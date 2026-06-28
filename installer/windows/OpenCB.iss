@@ -30,7 +30,6 @@ UninstallDisplayIcon={app}\opencb_app.exe
 SetupIconFile={#RepoRoot}\apps\opencb_app\windows\runner\resources\app_icon.ico
 
 [Languages]
-Name: "vietnamese"; MessagesFile: "compiler:Languages\Vietnamese.isl"
 Name: "english"; MessagesFile: "compiler:Default.isl"
 
 [Tasks]
