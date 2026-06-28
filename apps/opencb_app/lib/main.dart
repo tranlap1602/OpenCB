@@ -6623,6 +6623,9 @@ class _AnimatedClipboardEntryListState
     );
     return SizeTransition(
       sizeFactor: curved,
+      // Flutter 3.41 deprecates this in favor of alignment, but the current
+      // stable SDK used locally has not exposed the replacement yet.
+      // ignore: deprecated_member_use
       axisAlignment: -1,
       child: FadeTransition(
         opacity: curved,
