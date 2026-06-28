@@ -90,6 +90,9 @@ jobs:
         working-directory: apps/opencb_app
         run: flutter pub get
 
+      - name: Build Rust core release DLL
+        run: cargo build --release --package opencb_core
+
       - name: Build Windows release
         working-directory: apps/opencb_app
         run: flutter build windows --release

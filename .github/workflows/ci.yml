@@ -32,6 +32,9 @@ jobs:
         with:
           channel: stable
 
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
       - name: Flutter pub get
         working-directory: apps/opencb_app
         run: flutter pub get
@@ -43,6 +46,9 @@ jobs:
       - name: Test
         working-directory: apps/opencb_app
         run: flutter test
+
+      - name: Build Rust core release DLL
+        run: cargo build --release --package opencb_core
 
       - name: Build Windows debug
         working-directory: apps/opencb_app
