@@ -42,6 +42,12 @@ Trước khi đóng gói, kiểm tra trong thư mục release có:
 
 Khuyến nghị cho MVP nội bộ: dùng Inno Setup để tạo `.exe` installer nhanh.
 
+Installer hiện được tạo bằng Inno Setup khi push tag `v*` lên GitHub. File phát hành nằm trong GitHub Releases với tên dạng:
+
+```text
+OpenCB-Setup-<version>.exe
+```
+
 Installer cần có:
 
 - Shortcut Start Menu.
@@ -72,7 +78,7 @@ Manifest gợi ý:
 
 ## Code Signing
 
-Cần có code signing certificate thật trước khi ký bản phát hành public.
+Cần có code signing certificate thật trước khi ký bản phát hành public. Installer hiện tại chưa ký nên Windows SmartScreen có thể cảnh báo.
 
 Quy trình:
 

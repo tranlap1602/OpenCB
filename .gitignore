@@ -9,6 +9,8 @@ opencb_*.png
 
 # Local/generated helper folders
 .github/modernize/
+.secrets/
+dist/
 
 # Flutter build outputs
 build/

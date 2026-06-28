@@ -1,0 +1,50 @@
+#define AppName "OpenCB"
+#ifndef AppVersion
+#define AppVersion "1.0.0"
+#endif
+#ifndef RepoRoot
+#define RepoRoot "..\.."
+#endif
+
+#define BuildDir RepoRoot + "\apps\opencb_app\build\windows\x64\runner\Release"
+
+[Setup]
+AppId={{7F4C8D69-26AD-4E80-A4A9-31E3F7F0A8CB}
+AppName={#AppName}
+AppVersion={#AppVersion}
+AppPublisher=OpenCB
+AppPublisherURL=https://github.com/tranlap1602/OpenCB
+AppSupportURL=https://github.com/tranlap1602/OpenCB/issues
+AppUpdatesURL=https://github.com/tranlap1602/OpenCB/releases
+DefaultDirName={autopf}\OpenCB
+DefaultGroupName=OpenCB
+DisableProgramGroupPage=yes
+OutputDir={#RepoRoot}\dist
+OutputBaseFilename=OpenCB-Setup-{#AppVersion}
+Compression=lzma
+SolidCompression=yes
+WizardStyle=modern
+ArchitecturesAllowed=x64compatible
+ArchitecturesInstallIn64BitMode=x64compatible
+UninstallDisplayIcon={app}\opencb_app.exe
+SetupIconFile={#RepoRoot}\apps\opencb_app\windows\runner\resources\app_icon.ico
+
+[Languages]
+Name: "vietnamese"; MessagesFile: "compiler:Languages\Vietnamese.isl"
+Name: "english"; MessagesFile: "compiler:Default.isl"
+
+[Tasks]
+Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked
+
+[Files]
+Source: "{#BuildDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+
+[Icons]
+Name: "{group}\OpenCB"; Filename: "{app}\opencb_app.exe"
+Name: "{autodesktop}\OpenCB"; Filename: "{app}\opencb_app.exe"; Tasks: desktopicon
+
+[Run]
+Filename: "{app}\opencb_app.exe"; Description: "{cm:LaunchProgram,OpenCB}"; Flags: nowait postinstall skipifsilent
+
+[UninstallDelete]
+Type: filesandordirs; Name: "{app}"

@@ -98,7 +98,42 @@ git push origin main
 git push origin v0.1.0
 ```
 
-5. GitHub Actions sẽ chạy CI. Nếu dùng workflow release, tag `v*` có thể tạo artifact Windows portable.
+5. GitHub Actions sẽ chạy CI. Workflow release trên tag `v*` sẽ tạo file tải về trong GitHub Releases.
+
+## File Tải Về Chính Thức
+
+Workflow `Release` tạo các file:
+
+- `OpenCB-Setup-<version>.exe`: installer Windows tạo bằng Inno Setup.
+- `OpenCB-Windows-x64-<tag>.zip`: bản Windows portable để giải nén chạy trực tiếp.
+- `OpenCB-Android-release-<tag>.apk`: APK Android release đã ký bằng keystore riêng.
+
+Windows installer hiện chưa được code-sign bằng chứng chỉ public. Vì vậy Windows SmartScreen có thể vẫn cảnh báo ở lần tải/cài đầu tiên. Để giảm cảnh báo public cần mua code signing certificate rồi thêm bước `signtool` vào workflow.
+
+## Android Release Signing
+
+Android release APK cần cùng một keystore cho mọi bản cập nhật sau này. Không commit keystore vào Git.
+
+Tạo keystore local:
+
+```powershell
+.\scripts\create_android_keystore.ps1
+```
+
+Script sẽ tạo thư mục `.secrets` và in ra 4 giá trị cần thêm vào GitHub repository secrets:
+
+- `ANDROID_KEYSTORE_BASE64`
+- `ANDROID_KEYSTORE_PASSWORD`
+- `ANDROID_KEY_ALIAS`
+- `ANDROID_KEY_PASSWORD`
+
+Thêm secrets ở:
+
+```text
+GitHub repo -> Settings -> Secrets and variables -> Actions -> New repository secret
+```
+
+Sau khi có secrets, push tag `v*` để workflow build APK release đã ký.
 
 ## Update App Sau Này
 
