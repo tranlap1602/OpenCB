@@ -1,0 +1,13 @@
+<svg width="1280" height="360" viewBox="0 0 1280 360" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <g transform="translate(40 44) scale(0.53125)">
+    <rect width="512" height="512" rx="128" fill="#0E7C7B"/>
+    <path d="M166 132H346C368.091 132 386 149.909 386 172V356C386 378.091 368.091 396 346 396H166C143.909 396 126 378.091 126 356V172C126 149.909 143.909 132 166 132Z" fill="#EAF7F4"/>
+    <path d="M204 100H308C321.255 100 332 110.745 332 124V150C332 163.255 321.255 174 308 174H204C190.745 174 180 163.255 180 150V124C180 110.745 190.745 100 204 100Z" fill="#7DE2D1"/>
+    <g transform="rotate(-45 256 260)">
+      <g transform="translate(152.6 375.6) scale(0.22)">
+        <path d="M720-330q0 104-73 177T470-80q-104 0-177-73t-73-177v-370q0-75 52.5-127.5T400-880q75 0 127.5 52.5T580-700v350q0 46-32 78t-78 32q-46 0-78-32t-32-78v-370h80v370q0 13 8.5 21.5T470-320q13 0 21.5-8.5T500-350v-350q-1-42-29.5-71T400-800q-42 0-71 29t-29 71v370q-1 71 49 120.5T470-160q70 0 119-49.5T640-330v-390h80v390Z" fill="#0A5E5E"/>
+      </g>
+    </g>
+  </g>
+  <text x="368" y="222" fill="#0A5E5E" font-family="Inter, Segoe UI, Arial, sans-serif" font-size="118" font-weight="800" letter-spacing="0">OpenCB</text>
+</svg>

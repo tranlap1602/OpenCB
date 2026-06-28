@@ -1,0 +1,20 @@
+/target/
+/.dart_tool/
+/.idea/
+*.iml
+*.log
+*.tmp
+flutter_run_windows*.log
+opencb_*.png
+
+# Local/generated helper folders
+.github/modernize/
+
+# Flutter build outputs
+build/
+.flutter-plugins
+.flutter-plugins-dependencies
+
+# Windows local artifacts
+*.pdb
+*.ilk
