@@ -108,6 +108,7 @@ jobs:
           $windowsSource = "apps/opencb_app/build/windows/x64/runner/Release"
           $windowsZip = "OpenCB-Windows-x64-$tag.zip"
           $installer = "dist/OpenCB-Setup-$version.exe"
+          $installerAsset = "OpenCB-Setup-$tag.exe"
 
           Compress-Archive -Path "$windowsSource/*" -DestinationPath $windowsZip -Force
 
@@ -120,13 +121,14 @@ jobs:
           if (!(Test-Path $installer)) {
             throw "Installer was not created: $installer"
           }
+          Copy-Item $installer $installerAsset -Force
 
       - name: Upload Windows artifacts
         uses: actions/upload-artifact@v4
         with:
           name: OpenCB-Windows-${{ github.ref_name }}
           path: |
-            dist/OpenCB-Setup-*.exe
+            OpenCB-Setup-${{ github.ref_name }}.exe
             OpenCB-Windows-x64-${{ github.ref_name }}.zip
 
   publish:
@@ -146,4 +148,6 @@ jobs:
           draft: false
           prerelease: ${{ contains(github.ref_name, 'internal') || contains(github.ref_name, 'alpha') || contains(github.ref_name, 'beta') || contains(github.ref_name, 'rc') }}
           generate_release_notes: true
+          overwrite_files: true
+          fail_on_unmatched_files: true
           files: release-assets/*
