@@ -89,13 +89,13 @@ BEGIN
     BEGIN
         BLOCK "040904e4"
         BEGIN
-            VALUE "CompanyName", "com.opencb" "\0"
-            VALUE "FileDescription", "opencb_app" "\0"
+            VALUE "CompanyName", "OpenCB" "\0"
+            VALUE "FileDescription", "OpenCB" "\0"
             VALUE "FileVersion", VERSION_AS_STRING "\0"
-            VALUE "InternalName", "opencb_app" "\0"
-            VALUE "LegalCopyright", "Copyright (C) 2026 com.opencb. All rights reserved." "\0"
+            VALUE "InternalName", "OpenCB" "\0"
+            VALUE "LegalCopyright", "Copyright (C) 2026 OpenCB. All rights reserved." "\0"
             VALUE "OriginalFilename", "opencb_app.exe" "\0"
-            VALUE "ProductName", "opencb_app" "\0"
+            VALUE "ProductName", "OpenCB" "\0"
             VALUE "ProductVersion", VERSION_AS_STRING "\0"
         END
     END

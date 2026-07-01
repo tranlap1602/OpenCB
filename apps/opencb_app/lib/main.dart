@@ -3,11 +3,15 @@ import 'dart:convert';
 import 'dart:ffi' as ffi;
 import 'dart:io';
 import 'dart:math' as math;
+import 'dart:typed_data';
+import 'dart:ui' as ui;
 
+import 'package:desktop_drop/desktop_drop.dart';
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:ffi/ffi.dart';
+import 'package:file_picker/file_picker.dart';
 import 'package:mobile_scanner/mobile_scanner.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:qr_flutter/qr_flutter.dart';
@@ -23,9 +27,11 @@ void main() {
 void _configureAndroidEdgeToEdge() {
   if (!Platform.isAndroid) return;
   SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
+  const initialSystemBarColor = Color(0xFFFBFEFC);
   _applyAndroidSystemUiStyle(
     Brightness.light,
-    navigationBarColor: const Color(0xFFFBFEFC),
+    navigationBarColor: initialSystemBarColor,
+    statusBarColor: initialSystemBarColor,
   );
 }
 
@@ -54,6 +60,7 @@ void _applyAndroidSystemUiStyle(
       _rootPlatformChannel
           .invokeMethod<bool>('setSystemBars', {
             'navigationBarColor': navigationBarColor.toARGB32(),
+            'statusBarColor': (statusBarColor ?? navigationBarColor).toARGB32(),
             'lightSystemBars': brightness == Brightness.light,
             'edgeToEdge': true,
           })
@@ -64,9 +71,16 @@ void _applyAndroidSystemUiStyle(
 
 enum ClipboardKind { text, code, url, image, fileReference }
 
-const double _compactDesktopLayoutBreakpoint = 1120;
+enum _HistoryScopeFilter { all, pinned, tagged }
+
+const double _compactDesktopLayoutBreakpoint = 1020;
 const double _mobileLayoutBreakpoint = 840;
 const int _defaultRetentionLimit = 2000;
+const Duration _discoveredDeviceOnlineWindow = Duration(seconds: 20);
+const Duration _discoveredDeviceCacheWindow = Duration(minutes: 3);
+const Duration _discoveredDevicePruneInterval = Duration(seconds: 12);
+const Duration _discoveryReplyThrottle = Duration(seconds: 8);
+const Duration _discoverySubnetSweepInterval = Duration(seconds: 24);
 
 class ClipboardEntry {
   const ClipboardEntry({
@@ -237,6 +251,7 @@ class SyncPeer {
     required this.host,
     required this.port,
     required this.pairCode,
+    this.filePort = _defaultFileTransferPort,
     this.lastSyncedAt,
     this.lastError,
   });
@@ -250,6 +265,7 @@ class SyncPeer {
       host: json['host'] as String? ?? '127.0.0.1',
       port: json['port'] as int? ?? _defaultSyncPort,
       pairCode: json['pairCode'] as String? ?? '',
+      filePort: json['filePort'] as int? ?? _defaultFileTransferPort,
       lastSyncedAt: DateTime.tryParse(json['lastSyncedAt'] as String? ?? ''),
       lastError: json['lastError'] as String?,
     );
@@ -260,6 +276,7 @@ class SyncPeer {
   final String host;
   final int port;
   final String pairCode;
+  final int filePort;
   final DateTime? lastSyncedAt;
   final String? lastError;
 
@@ -278,6 +295,7 @@ class SyncPeer {
       'host': host,
       'port': port,
       'pairCode': pairCode,
+      'filePort': filePort,
       'lastSyncedAt': lastSyncedAt?.toIso8601String(),
       'lastError': lastError,
     };
@@ -289,6 +307,7 @@ class SyncPeer {
     String? host,
     int? port,
     String? pairCode,
+    int? filePort,
     DateTime? lastSyncedAt,
     String? lastError,
     bool clearError = false,
@@ -299,6 +318,7 @@ class SyncPeer {
       host: host ?? this.host,
       port: port ?? this.port,
       pairCode: pairCode ?? this.pairCode,
+      filePort: filePort ?? this.filePort,
       lastSyncedAt: lastSyncedAt ?? this.lastSyncedAt,
       lastError: clearError ? null : lastError ?? this.lastError,
     );
@@ -311,6 +331,7 @@ class DiscoveredSyncDevice {
     required this.name,
     required this.host,
     required this.port,
+    required this.filePort,
     required this.lastSeenAt,
   });
 
@@ -318,6 +339,7 @@ class DiscoveredSyncDevice {
   final String name;
   final String host;
   final int port;
+  final int filePort;
   final DateTime lastSeenAt;
 
   String get endpoint => '$host:$port';
@@ -329,6 +351,269 @@ class DiscoveredSyncDevice {
       host: host,
       port: port,
       pairCode: pairCode,
+      filePort: filePort,
+    );
+  }
+}
+
+enum FileTransferDirection { send, receive }
+
+enum FileTransferStatus {
+  waiting,
+  sending,
+  receiving,
+  completed,
+  rejected,
+  failed,
+  canceled,
+}
+
+class _FileTransferCanceledException implements Exception {
+  const _FileTransferCanceledException();
+}
+
+class _SocketFrameReader {
+  _SocketFrameReader(Socket socket) : _iterator = StreamIterator(socket);
+
+  final StreamIterator<List<int>> _iterator;
+  Uint8List _buffer = Uint8List(0);
+  int _offset = 0;
+
+  Future<Map<String, dynamic>> readJson({
+    Duration timeout = const Duration(seconds: 30),
+  }) async {
+    final line = await _readLine().timeout(timeout);
+    return jsonDecode(line) as Map<String, dynamic>;
+  }
+
+  Future<void> readBytes(
+    int byteCount,
+    FutureOr<void> Function(Uint8List bytes) onChunk,
+  ) async {
+    var remaining = byteCount;
+    while (remaining > 0) {
+      if (_available == 0) {
+        await _fill();
+      }
+      final take = math.min(remaining, _available);
+      final chunk = Uint8List.sublistView(_buffer, _offset, _offset + take);
+      _offset += take;
+      remaining -= take;
+      _compactBuffer();
+      await onChunk(chunk);
+    }
+  }
+
+  int get _available => _buffer.length - _offset;
+
+  Future<String> _readLine() async {
+    while (true) {
+      for (var index = _offset; index < _buffer.length; index += 1) {
+        if (_buffer[index] != 10) continue;
+        var end = index;
+        if (end > _offset && _buffer[end - 1] == 13) {
+          end -= 1;
+        }
+        final bytes = Uint8List.sublistView(_buffer, _offset, end);
+        _offset = index + 1;
+        _compactBuffer();
+        return utf8.decode(bytes);
+      }
+      await _fill();
+    }
+  }
+
+  Future<void> _fill() async {
+    if (!await _iterator.moveNext()) {
+      throw const SocketException('Kết nối đã đóng.');
+    }
+    final incoming = _iterator.current;
+    if (_offset == 0) {
+      final next = Uint8List(_buffer.length + incoming.length);
+      next.setRange(0, _buffer.length, _buffer);
+      next.setRange(_buffer.length, next.length, incoming);
+      _buffer = next;
+    } else {
+      final remaining = _buffer.length - _offset;
+      final next = Uint8List(remaining + incoming.length);
+      next.setRange(0, remaining, _buffer, _offset);
+      next.setRange(remaining, next.length, incoming);
+      _buffer = next;
+      _offset = 0;
+    }
+  }
+
+  void _compactBuffer() {
+    if (_offset == 0) return;
+    if (_offset == _buffer.length) {
+      _buffer = Uint8List(0);
+      _offset = 0;
+      return;
+    }
+    if (_offset > 1024 * 1024) {
+      _buffer = Uint8List.sublistView(_buffer, _offset);
+      _offset = 0;
+    }
+  }
+}
+
+class FileTransferFile {
+  const FileTransferFile({
+    required this.name,
+    required this.size,
+    this.path,
+    this.uri,
+    this.savedPath,
+    this.relativePath,
+  });
+
+  factory FileTransferFile.fromJson(Map<String, dynamic> json) {
+    return FileTransferFile(
+      name: json['name'] as String? ?? 'file',
+      size: json['size'] as int? ?? 0,
+      path: json['path'] as String?,
+      uri: json['uri'] as String?,
+      savedPath: json['savedPath'] as String?,
+      relativePath: json['relativePath'] as String?,
+    );
+  }
+
+  final String name;
+  final int size;
+  final String? path;
+  final String? uri;
+  final String? savedPath;
+  final String? relativePath;
+
+  Map<String, dynamic> toJson() {
+    return {
+      'name': name,
+      'size': size,
+      if (path != null) 'path': path,
+      if (uri != null) 'uri': uri,
+      if (savedPath != null) 'savedPath': savedPath,
+      if (relativePath != null) 'relativePath': relativePath,
+    };
+  }
+
+  FileTransferFile copyWith({String? savedPath}) {
+    return FileTransferFile(
+      name: name,
+      size: size,
+      path: path,
+      uri: uri,
+      savedPath: savedPath ?? this.savedPath,
+      relativePath: relativePath,
+    );
+  }
+
+  String get displayPath {
+    final value = relativePath?.trim();
+    if (value == null || value.isEmpty) return name;
+    return value;
+  }
+}
+
+class FileTransferRecord {
+  const FileTransferRecord({
+    required this.id,
+    required this.peerId,
+    required this.peerName,
+    required this.direction,
+    required this.status,
+    required this.files,
+    required this.totalBytes,
+    required this.transferredBytes,
+    required this.createdAt,
+    this.speedBytesPerSecond = 0,
+    this.error,
+    this.saveDirectory,
+  });
+
+  factory FileTransferRecord.fromJson(Map<String, dynamic> json) {
+    return FileTransferRecord(
+      id: json['id'] as String? ?? _generateTransferId(),
+      peerId: json['peerId'] as String? ?? '',
+      peerName: json['peerName'] as String? ?? 'Thiết bị LAN',
+      direction: FileTransferDirection.values.firstWhere(
+        (direction) => direction.name == json['direction'],
+        orElse: () => FileTransferDirection.receive,
+      ),
+      status: FileTransferStatus.values.firstWhere(
+        (status) => status.name == json['status'],
+        orElse: () => FileTransferStatus.completed,
+      ),
+      files: (json['files'] as List<dynamic>? ?? const [])
+          .whereType<Map<String, dynamic>>()
+          .map(FileTransferFile.fromJson)
+          .toList(),
+      totalBytes: json['totalBytes'] as int? ?? 0,
+      transferredBytes: json['transferredBytes'] as int? ?? 0,
+      speedBytesPerSecond: json['speedBytesPerSecond'] as int? ?? 0,
+      createdAt:
+          DateTime.tryParse(json['createdAt'] as String? ?? '') ??
+          DateTime.now(),
+      error: json['error'] as String?,
+      saveDirectory: json['saveDirectory'] as String?,
+    );
+  }
+
+  final String id;
+  final String peerId;
+  final String peerName;
+  final FileTransferDirection direction;
+  final FileTransferStatus status;
+  final List<FileTransferFile> files;
+  final int totalBytes;
+  final int transferredBytes;
+  final DateTime createdAt;
+  final int speedBytesPerSecond;
+  final String? error;
+  final String? saveDirectory;
+
+  double get progress {
+    if (totalBytes <= 0) return status == FileTransferStatus.completed ? 1 : 0;
+    return (transferredBytes / totalBytes).clamp(0, 1).toDouble();
+  }
+
+  Map<String, dynamic> toJson() {
+    return {
+      'id': id,
+      'peerId': peerId,
+      'peerName': peerName,
+      'direction': direction.name,
+      'status': status.name,
+      'files': files.map((file) => file.toJson()).toList(),
+      'totalBytes': totalBytes,
+      'transferredBytes': transferredBytes,
+      'speedBytesPerSecond': speedBytesPerSecond,
+      'createdAt': createdAt.toIso8601String(),
+      'error': error,
+      'saveDirectory': saveDirectory,
+    };
+  }
+
+  FileTransferRecord copyWith({
+    FileTransferStatus? status,
+    List<FileTransferFile>? files,
+    int? transferredBytes,
+    int? speedBytesPerSecond,
+    String? error,
+    String? saveDirectory,
+  }) {
+    return FileTransferRecord(
+      id: id,
+      peerId: peerId,
+      peerName: peerName,
+      direction: direction,
+      status: status ?? this.status,
+      files: files ?? this.files,
+      totalBytes: totalBytes,
+      transferredBytes: transferredBytes ?? this.transferredBytes,
+      createdAt: createdAt,
+      speedBytesPerSecond: speedBytesPerSecond ?? this.speedBytesPerSecond,
+      error: error ?? this.error,
+      saveDirectory: saveDirectory ?? this.saveDirectory,
     );
   }
 }
@@ -381,13 +666,11 @@ class M3ThemePreset {
   const M3ThemePreset({
     required this.id,
     required this.name,
-    required this.description,
     required this.seedColor,
   });
 
   final String id;
   final String name;
-  final String description;
   final Color seedColor;
 }
 
@@ -395,37 +678,27 @@ const List<M3ThemePreset> _m3ThemePresets = [
   M3ThemePreset(
     id: 'opencb_teal',
     name: 'Xanh OpenCB',
-    description: 'Bình tĩnh, tập trung, hợp làm việc với clipboard',
     seedColor: Color(0xFF0E7C7B),
-  ),
-  M3ThemePreset(
-    id: 'baseline_purple',
-    name: 'Tím Material',
-    description: 'Cảm giác Material You cổ điển',
-    seedColor: Color(0xFF6750A4),
-  ),
-  M3ThemePreset(
-    id: 'ocean_blue',
-    name: 'Xanh Đại Dương',
-    description: 'Sạch, rõ, hợp công cụ desktop',
-    seedColor: Color(0xFF006A6A),
-  ),
-  M3ThemePreset(
-    id: 'ink_blue',
-    name: 'Mực Lam',
-    description: 'Sắc xanh lam trầm, rõ nét nhưng không gắt',
-    seedColor: Color(0xFF285EA8),
   ),
   M3ThemePreset(
     id: 'forest_green',
     name: 'Xanh Rừng',
-    description: 'Dịu mắt, dễ tập trung',
     seedColor: Color(0xFF386A20),
+  ),
+  M3ThemePreset(
+    id: 'baseline_purple',
+    name: 'Tôm Càng Tím',
+    seedColor: Color(0xFF7B4DFF),
+  ),
+  M3ThemePreset(id: 'ink_blue', name: 'Serenity', seedColor: Color(0xFF285EA8)),
+  M3ThemePreset(
+    id: 'soft_pink',
+    name: 'Rose Quartz',
+    seedColor: Color(0xFFFFD7E3),
   ),
   M3ThemePreset(
     id: 'sunset_coral',
     name: 'San Hô Hoàng Hôn',
-    description: 'Ấm hơn, giàu sắc thái hơn',
     seedColor: Color(0xFFB3261E),
   ),
 ];
@@ -549,6 +822,7 @@ class ClipboardSettings {
     required this.quickOpenHotKey,
     required this.windowsAutoStart,
     required this.androidBackgroundSync,
+    required this.androidClipboardSendPrompt,
   });
 
   factory ClipboardSettings.defaults() {
@@ -570,7 +844,8 @@ class ClipboardSettings {
         keyCode: 0x56,
       ),
       windowsAutoStart: false,
-      androidBackgroundSync: false,
+      androidBackgroundSync: true,
+      androidClipboardSendPrompt: false,
     );
   }
 
@@ -589,8 +864,7 @@ class ClipboardSettings {
       excludedSources: sources,
       autoPasteFromQuickPicker:
           json['autoPasteFromQuickPicker'] as bool? ?? true,
-      autoSetClipboardFromSync:
-          json['autoSetClipboardFromSync'] as bool? ?? true,
+      autoSetClipboardFromSync: true,
       captureText: json['captureText'] as bool? ?? true,
       captureImages: json['captureImages'] as bool? ?? true,
       captureFileReferences: json['captureFileReferences'] as bool? ?? true,
@@ -600,7 +874,8 @@ class ClipboardSettings {
             : null,
       ),
       windowsAutoStart: json['windowsAutoStart'] as bool? ?? false,
-      androidBackgroundSync: json['androidBackgroundSync'] as bool? ?? false,
+      androidBackgroundSync: true,
+      androidClipboardSendPrompt: false,
     );
   }
 
@@ -614,6 +889,7 @@ class ClipboardSettings {
   final QuickOpenHotKey quickOpenHotKey;
   final bool windowsAutoStart;
   final bool androidBackgroundSync;
+  final bool androidClipboardSendPrompt;
 
   Map<String, dynamic> toJson() {
     return {
@@ -627,6 +903,7 @@ class ClipboardSettings {
       'quickOpenHotKey': quickOpenHotKey.toJson(),
       'windowsAutoStart': windowsAutoStart,
       'androidBackgroundSync': androidBackgroundSync,
+      'androidClipboardSendPrompt': androidClipboardSendPrompt,
     };
   }
 
@@ -641,6 +918,7 @@ class ClipboardSettings {
     QuickOpenHotKey? quickOpenHotKey,
     bool? windowsAutoStart,
     bool? androidBackgroundSync,
+    bool? androidClipboardSendPrompt,
   }) {
     return ClipboardSettings(
       retentionLimit: _normalizeRetentionLimit(
@@ -665,6 +943,8 @@ class ClipboardSettings {
       windowsAutoStart: windowsAutoStart ?? this.windowsAutoStart,
       androidBackgroundSync:
           androidBackgroundSync ?? this.androidBackgroundSync,
+      androidClipboardSendPrompt:
+          androidClipboardSendPrompt ?? this.androidClipboardSendPrompt,
     );
   }
 }
@@ -714,7 +994,7 @@ class OpenCbApp extends StatefulWidget {
   State<OpenCbApp> createState() => _OpenCbAppState();
 }
 
-class _OpenCbAppState extends State<OpenCbApp> {
+class _OpenCbAppState extends State<OpenCbApp> with WidgetsBindingObserver {
   ThemeMode _themeMode = ThemeMode.light;
   M3ThemePreset _themePreset = _m3ThemePresets.first;
 
@@ -736,14 +1016,30 @@ class _OpenCbAppState extends State<OpenCbApp> {
     _applyAndroidSystemUiStyle(
       brightness,
       navigationBarColor: colorScheme.surfaceContainerLowest,
+      statusBarColor: colorScheme.surfaceContainerLowest,
     );
   }
 
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _applyCurrentAndroidSystemUiStyle();
     _loadThemeSettings();
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state != AppLifecycleState.resumed) return;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) _applyCurrentAndroidSystemUiStyle();
+    });
   }
 
   Future<void> _loadThemeSettings() async {
@@ -904,12 +1200,13 @@ class ClipboardHomePage extends StatefulWidget {
   State<ClipboardHomePage> createState() => _ClipboardHomePageState();
 }
 
-class _ClipboardHomePageState extends State<ClipboardHomePage> {
+class _ClipboardHomePageState extends State<ClipboardHomePage>
+    with WidgetsBindingObserver {
   static const Duration _quickPickerExitDuration = Duration(milliseconds: 130);
   static const List<String> _mobileMainSections = [
     'Lịch sử',
-    'Đã ghim',
-    'Thẻ',
+    'Gửi file',
+    'Thiết bị',
     'Cài đặt',
   ];
   static const MethodChannel _windowsClipboardChannel = MethodChannel(
@@ -922,12 +1219,16 @@ class _ClipboardHomePageState extends State<ClipboardHomePage> {
   final TextEditingController _searchController = TextEditingController();
   final FocusNode _searchFocusNode = FocusNode();
   final PageController _mobilePageController = PageController();
+  final GlobalKey _desktopDetailActionBarKey = GlobalKey();
   Timer? _pollTimer;
   Timer? _autoSyncTimer;
   Timer? _discoveryTimer;
   ServerSocket? _syncServer;
+  ServerSocket? _fileTransferServer;
   RawDatagramSocket? _discoverySocket;
   int _selectedIndex = 0;
+  int? _mobilePageAnimationTargetIndex;
+  _HistoryScopeFilter _historyScopeFilter = _HistoryScopeFilter.all;
   bool _capturePaused = false;
   bool _lanSyncEnabled = true;
   bool _loaded = false;
@@ -937,11 +1238,17 @@ class _ClipboardHomePageState extends State<ClipboardHomePage> {
   bool _openingMainFromQuickPicker = false;
   bool _syncHostRefreshInFlight = false;
   bool _mobileSearchOpen = false;
+  bool _appInForeground = true;
+  DateTime _lastDiscoveredDevicePruneAt = DateTime.fromMillisecondsSinceEpoch(
+    0,
+  );
+  DateTime _lastDiscoverySubnetSweepAt = DateTime.fromMillisecondsSinceEpoch(0);
   Future<void>? _quickPickerCloseFuture;
   final int _syncPort = _defaultSyncPort;
   String _syncHost = Platform.localHostname;
   String _section = 'Lịch sử';
   ClipboardKind? _kindFilter;
+  FileTransferStatus? _fileTransferStatusFilter;
   String? _syncError;
   String? _lastClipboardText;
   OpenCbStorage? _storage;
@@ -949,7 +1256,7 @@ class _ClipboardHomePageState extends State<ClipboardHomePage> {
   ClipboardSettings _clipboardSettings = ClipboardSettings.defaults();
   Map<String, Uint8List> _sourceIcons = {};
   Map<String, TagDefinition> _tagDefinitions = {};
-  Set<String> _tagFilters = {};
+  final Set<String> _tagFilters = {};
   Set<String> _bulkSelectedIds = {};
   bool _bulkSelectMode = false;
   String? _promotedEntryId;
@@ -958,20 +1265,39 @@ class _ClipboardHomePageState extends State<ClipboardHomePage> {
   final Map<String, Timer> _pendingDeleteTimers = {};
   final Map<String, DateTime> _syncTombstones = {};
   final Map<String, DateTime> _peerDiscoveryRetryAfter = {};
+  final Map<String, DateTime> _discoveryReplyAfter = {};
+  final Map<String, ({int bytes, DateTime at})> _fileTransferSpeedSamples = {};
+  final Map<String, Completer<bool>> _pendingFileOfferDecisions = {};
+  final Map<String, FileTransferRecord> _pendingFileOfferRecords = {};
+  final Map<String, Socket> _activeFileTransferSockets = {};
+  final Set<String> _canceledFileTransferIds = {};
+  final Set<String> _fileTransferTargetIds = {};
+  OverlayEntry? _noticeOverlayEntry;
+  Timer? _noticeOverlayTimer;
+  bool _showingPendingFileOfferDialog = false;
+  bool _draggingTransferFiles = false;
+  bool _androidIgnoringBatteryOptimizations = false;
   List<ClipboardEntry> _entries = [];
   List<SyncPeer> _peers = [];
+  List<FileTransferRecord> _fileTransfers = [];
+  List<FileTransferFile> _selectedTransferFiles = [];
   Map<String, DiscoveredSyncDevice> _discoveredDevices = {};
 
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
+    _platformChannel.setMethodCallHandler(_handlePlatformMethodCall);
     _refreshSyncHost();
     _initializeStorage();
+    _loadFileTransfers();
     _initializeSync();
+    unawaited(_consumePendingSharedFiles());
   }
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _pollTimer?.cancel();
     _autoSyncTimer?.cancel();
     _discoveryTimer?.cancel();
@@ -980,7 +1306,17 @@ class _ClipboardHomePageState extends State<ClipboardHomePage> {
       timer.cancel();
     }
     _syncServer?.close();
+    _fileTransferServer?.close();
+    for (final socket in _activeFileTransferSockets.values) {
+      socket.destroy();
+    }
+    for (final completer in _pendingFileOfferDecisions.values) {
+      if (!completer.isCompleted) completer.complete(false);
+    }
+    _noticeOverlayTimer?.cancel();
+    _noticeOverlayEntry?.remove();
     _windowsClipboardChannel.setMethodCallHandler(null);
+    _platformChannel.setMethodCallHandler(null);
     _storage?.close();
     _mobilePageController.dispose();
     _searchFocusNode.dispose();
@@ -988,7 +1324,78 @@ class _ClipboardHomePageState extends State<ClipboardHomePage> {
     super.dispose();
   }
 
-  List<ClipboardEntry> _visibleEntriesForSection(String section) {
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    _appInForeground = state == AppLifecycleState.resumed;
+    if (_appInForeground) {
+      unawaited(_refreshAndroidBatteryOptimizationStatus());
+      unawaited(_captureClipboardText());
+      unawaited(_syncAllPeers());
+      unawaited(_showNextPendingFileOfferDialog());
+    }
+  }
+
+  Future<dynamic> _handlePlatformMethodCall(MethodCall call) async {
+    if (call.method == 'fileOfferNotificationAction') {
+      final args = call.arguments;
+      if (args is! Map) return null;
+      final transferId = args['transferId']?.toString();
+      final action = args['action']?.toString();
+      if (transferId == null || action == null) return null;
+      if (action == 'open') {
+        unawaited(_showPendingFileOfferDialog(transferId));
+        return null;
+      }
+      final completer = _pendingFileOfferDecisions.remove(transferId);
+      _pendingFileOfferRecords.remove(transferId);
+      if (completer != null && !completer.isCompleted) {
+        completer.complete(action == 'accept');
+      }
+      return null;
+    }
+    if (call.method == 'sharedFiles') {
+      await _stageSharedFiles(call.arguments);
+      return null;
+    }
+    if (call.method == 'androidClipboardText') {
+      final args = call.arguments;
+      if (args is! Map) return null;
+      final text = args['text']?.toString();
+      if (text == null || text.isEmpty) return null;
+      final source = args['source']?.toString();
+      await _captureTextValue(
+        text,
+        source: source == null || source.isEmpty ? 'Clipboard Android' : source,
+      );
+      return null;
+    }
+    if (call.method == 'backgroundNotificationAction') {
+      final args = call.arguments;
+      if (args is! Map) return null;
+      final action = args['action']?.toString();
+      if (action == 'sendClipboard') {
+        await _sendClipboardFromNotification(args['text']?.toString());
+      }
+      return null;
+    }
+    return null;
+  }
+
+  Future<void> _consumePendingSharedFiles() async {
+    if (!Platform.isAndroid) return;
+    try {
+      final files = await _platformChannel.invokeMethod<List<dynamic>>(
+        'consumeSharedFiles',
+      );
+      if (files == null || files.isEmpty) return;
+      await _stageSharedFiles(files);
+    } catch (_) {}
+  }
+
+  List<ClipboardEntry> _visibleEntriesForSection(
+    String section, {
+    _HistoryScopeFilter? historyScopeOverride,
+  }) {
     Iterable<ClipboardEntry> entries = _entries.where(
       (entry) => !_pendingDeleteIds.contains(entry.id),
     );
@@ -998,10 +1405,20 @@ class _ClipboardHomePageState extends State<ClipboardHomePage> {
     if (section == 'Thẻ') {
       entries = entries.where((entry) => entry.tags.isNotEmpty);
     }
+    if (section == 'Lịch sử') {
+      final historyScope = historyScopeOverride ?? _historyScopeFilter;
+      entries = switch (historyScope) {
+        _HistoryScopeFilter.all => entries,
+        _HistoryScopeFilter.pinned => entries.where((entry) => entry.pinned),
+        _HistoryScopeFilter.tagged => entries.where(
+          (entry) => entry.tags.isNotEmpty,
+        ),
+      };
+    }
     if (_kindFilter != null) {
       entries = entries.where((entry) => entry.kind == _kindFilter);
     }
-    if (_tagFilters.isNotEmpty) {
+    if (section != 'Lịch sử' && _tagFilters.isNotEmpty) {
       entries = entries.where((entry) => entry.tags.any(_tagFilters.contains));
     }
 
@@ -1043,6 +1460,17 @@ class _ClipboardHomePageState extends State<ClipboardHomePage> {
     await _migrateLegacyHistory(storage);
     await _cleanupLegacyPinnedItems(storage);
     await _loadEntries();
+    if (Platform.isWindows && _clipboardSettings.windowsAutoStart) {
+      unawaited(_applyWindowsAutoStart(true));
+    }
+    await _syncAndroidBackgroundService(
+      _clipboardSettings.androidBackgroundSync,
+      openBatterySettings: false,
+    );
+    await _syncAndroidClipboardSendPromptPreference(
+      _clipboardSettings.androidClipboardSendPrompt,
+    );
+    await _refreshAndroidBatteryOptimizationStatus();
     await _startNativeClipboardBridge();
   }
 
@@ -1225,21 +1653,34 @@ class _ClipboardHomePageState extends State<ClipboardHomePage> {
 
   Future<void> _updateClipboardSettings(ClipboardSettings settings) async {
     final previousSettings = _clipboardSettings;
-    setState(() => _clipboardSettings = settings);
-    await _saveClipboardSettings();
     if (jsonEncode(previousSettings.quickOpenHotKey.toJson()) !=
         jsonEncode(settings.quickOpenHotKey.toJson())) {
+      setState(() => _clipboardSettings = settings);
+      await _saveClipboardSettings();
       await _applyQuickOpenHotKey(settings.quickOpenHotKey);
+      return;
     }
     if (previousSettings.windowsAutoStart != settings.windowsAutoStart) {
+      setState(() => _clipboardSettings = settings);
+      await _saveClipboardSettings();
       await _applyWindowsAutoStart(settings.windowsAutoStart);
+      return;
     }
     if (previousSettings.androidBackgroundSync !=
         settings.androidBackgroundSync) {
-      await _applyAndroidBackgroundSyncPreference(
+      final applied = await _applyAndroidBackgroundSyncPreference(
         settings.androidBackgroundSync,
       );
+      if (!applied) return;
     }
+    if (previousSettings.androidClipboardSendPrompt !=
+        settings.androidClipboardSendPrompt) {
+      await _syncAndroidClipboardSendPromptPreference(
+        settings.androidClipboardSendPrompt,
+      );
+    }
+    setState(() => _clipboardSettings = settings);
+    await _saveClipboardSettings();
   }
 
   Future<void> _applyQuickOpenHotKey(QuickOpenHotKey hotKey) async {
@@ -1270,7 +1711,7 @@ class _ClipboardHomePageState extends State<ClipboardHomePage> {
               '/t',
               'REG_SZ',
               '/d',
-              '"${Platform.resolvedExecutable}"',
+              '"${Platform.resolvedExecutable}" --background',
               '/f',
             ])
           : await Process.run('reg', ['delete', runKey, '/v', 'OpenCB', '/f']);
@@ -1284,21 +1725,149 @@ class _ClipboardHomePageState extends State<ClipboardHomePage> {
     }
   }
 
-  Future<void> _applyAndroidBackgroundSyncPreference(bool enabled) async {
+  Future<bool> _applyAndroidBackgroundSyncPreference(bool enabled) async {
+    if (!Platform.isAndroid) return true;
+    return _syncAndroidBackgroundService(enabled, openBatterySettings: enabled);
+  }
+
+  Future<void> _syncAndroidClipboardSendPromptPreference(bool enabled) async {
     if (!Platform.isAndroid) return;
-    if (!enabled) return;
     try {
+      await _platformChannel.invokeMethod<bool>(
+        'setClipboardSendPromptEnabled',
+        {'enabled': enabled},
+      );
+    } catch (_) {}
+  }
+
+  Future<bool> _syncAndroidBackgroundService(
+    bool enabled, {
+    required bool openBatterySettings,
+  }) async {
+    if (!Platform.isAndroid) return true;
+    try {
+      if (enabled) {
+        await _platformChannel
+            .invokeMethod<bool>('requestNotificationPermission')
+            .catchError((_) => false);
+      }
+      final serviceOk = await _platformChannel.invokeMethod<bool>(
+        enabled ? 'startBackgroundSyncService' : 'stopBackgroundSyncService',
+      );
+      if (serviceOk == false && mounted) {
+        _showCenterSnackBar(
+          enabled
+              ? 'Không bật được chạy nền Android.'
+              : 'Không tắt được chạy nền Android.',
+        );
+        return false;
+      }
+      if (!enabled || !openBatterySettings) return true;
       final opened = await _platformChannel.invokeMethod<bool>(
         'requestIgnoreBatteryOptimizations',
       );
       if (opened == false && mounted) {
         _showCenterSnackBar('Không mở được cài đặt tối ưu pin.');
       }
+      return true;
     } catch (_) {
       if (mounted) {
-        _showCenterSnackBar('Không mở được cài đặt tối ưu pin.');
+        _showCenterSnackBar(
+          enabled
+              ? 'Không bật được chạy nền Android.'
+              : 'Không tắt được chạy nền Android.',
+        );
+      }
+      return false;
+    }
+  }
+
+  Future<void> _openAndroidNotificationSettings() async {
+    if (!Platform.isAndroid) return;
+    try {
+      final opened = await _platformChannel.invokeMethod<bool>(
+        'openNotificationSettings',
+      );
+      if (opened == false && mounted) {
+        _showCenterSnackBar('Không mở được cài đặt thông báo.');
+      }
+    } catch (_) {
+      if (mounted) {
+        _showCenterSnackBar('Không mở được cài đặt thông báo.');
       }
     }
+  }
+
+  Future<void> _refreshAndroidBatteryOptimizationStatus() async {
+    if (!Platform.isAndroid) return;
+    try {
+      final ignoring = await _platformChannel.invokeMethod<bool>(
+        'isIgnoringBatteryOptimizations',
+      );
+      if (!mounted || ignoring == null) return;
+      setState(() => _androidIgnoringBatteryOptimizations = ignoring);
+    } catch (_) {}
+  }
+
+  Future<void> _toggleAndroidBatteryOptimizationBypass(bool enabled) async {
+    if (!Platform.isAndroid) return;
+    if (enabled) {
+      try {
+        final opened = await _platformChannel.invokeMethod<bool>(
+          'requestIgnoreBatteryOptimizations',
+        );
+        if (opened == false && mounted) {
+          _showCenterSnackBar('Không mở được cài đặt tối ưu pin.');
+        }
+      } catch (_) {
+        if (mounted) {
+          _showCenterSnackBar('Không mở được cài đặt tối ưu pin.');
+        }
+      }
+      await _refreshAndroidBatteryOptimizationStatus();
+      return;
+    }
+    await _openAndroidAppSettings();
+  }
+
+  Future<void> _openAndroidAppSettings() async {
+    if (!Platform.isAndroid) return;
+    try {
+      final opened = await _platformChannel.invokeMethod<bool>(
+        'openAppSettings',
+      );
+      if (opened == false && mounted) {
+        _showCenterSnackBar('Không mở được cài đặt ứng dụng.');
+      }
+    } catch (_) {
+      if (mounted) {
+        _showCenterSnackBar('Không mở được cài đặt ứng dụng.');
+      }
+    }
+  }
+
+  Future<bool> _showAndroidBackgroundNotification({
+    required String title,
+    required String body,
+    String? transferId,
+    bool showFileOfferActions = false,
+    bool silent = false,
+  }) async {
+    if (!Platform.isAndroid || _appInForeground) return false;
+    try {
+      return await _platformChannel.invokeMethod<bool>(
+            'showOpenCbNotification',
+            {
+              'title': title,
+              'body': body,
+              ...?(transferId == null ? null : {'transferId': transferId}),
+              'showFileOfferActions': showFileOfferActions,
+              'silent': silent,
+            },
+          ) ??
+          false;
+    } catch (_) {}
+    return false;
   }
 
   Future<void> _addExcludedSource(String source) async {
@@ -1511,6 +2080,7 @@ class _ClipboardHomePageState extends State<ClipboardHomePage> {
     await _loadSyncIdentity();
     await _loadPeers();
     await _startSyncServer();
+    await _startFileTransferServer();
     await _startLanDiscovery();
     _startAutoSync();
   }
@@ -1631,6 +2201,34 @@ class _ClipboardHomePageState extends State<ClipboardHomePage> {
     _syncServer = null;
   }
 
+  Future<void> _startFileTransferServer() async {
+    if (!_lanSyncEnabled || _fileTransferServer != null) return;
+    try {
+      _fileTransferServer = await ServerSocket.bind(
+        InternetAddress.anyIPv4,
+        _defaultFileTransferPort,
+        shared: true,
+      );
+      _fileTransferServer!.listen(_handleFileTransferSocket, onError: (_) {});
+    } catch (error) {
+      if (mounted && _syncError == null) {
+        setState(
+          () =>
+              _syncError = 'Port file $_defaultFileTransferPort không khả dụng',
+        );
+      }
+    }
+  }
+
+  Future<void> _stopFileTransferServer() async {
+    await _fileTransferServer?.close();
+    _fileTransferServer = null;
+    for (final socket in _activeFileTransferSockets.values) {
+      socket.destroy();
+    }
+    _activeFileTransferSockets.clear();
+  }
+
   Future<void> _startLanDiscovery() async {
     if (!_lanSyncEnabled || _discoverySocket != null) return;
     try {
@@ -1679,24 +2277,54 @@ class _ClipboardHomePageState extends State<ClipboardHomePage> {
     if (mounted && detectedHost != null && detectedHost != _syncHost) {
       setState(() => _syncHost = detectedHost);
     }
-    final payload = jsonEncode({
-      'protocol': _discoveryProtocol,
-      'deviceId': _syncIdentity.deviceId,
-      'deviceName': _syncIdentity.deviceName,
-      'host': beaconHost,
-      'port': _syncPort,
-    });
+    final payload = _discoveryPayload(beaconHost);
     final bytes = utf8.encode(payload);
     final targets = {
       for (final target in await _discoveryBroadcastTargets()) target.address,
       for (final peer in _peers)
         if (_isUsableLanIpv4(peer.host)) peer.host,
     };
+    final now = DateTime.now();
+    if (_appInForeground &&
+        now.difference(_lastDiscoverySubnetSweepAt) >=
+            _discoverySubnetSweepInterval) {
+      _lastDiscoverySubnetSweepAt = now;
+      targets.addAll(_classCSubnetTargets(beaconHost));
+    }
     for (final target in targets) {
       try {
         socket.send(bytes, InternetAddress(target), _syncPort);
       } catch (_) {}
     }
+  }
+
+  String _discoveryPayload(String beaconHost) {
+    return jsonEncode({
+      'protocol': _discoveryProtocol,
+      'deviceId': _syncIdentity.deviceId,
+      'deviceName': _syncIdentity.deviceName,
+      'host': beaconHost,
+      'port': _syncPort,
+      'filePort': _defaultFileTransferPort,
+    });
+  }
+
+  Future<void> _sendDiscoveryReply(String target) async {
+    final socket = _discoverySocket;
+    if (!_lanSyncEnabled || socket == null || !_isUsableLanIpv4(target)) return;
+    final now = DateTime.now();
+    final retryAfter = _discoveryReplyAfter[target];
+    if (retryAfter != null && now.isBefore(retryAfter)) return;
+    _discoveryReplyAfter[target] = now.add(_discoveryReplyThrottle);
+    final detectedHost = await _detectLanIpv4Address();
+    final beaconHost = detectedHost ?? _syncHost;
+    try {
+      socket.send(
+        utf8.encode(_discoveryPayload(beaconHost)),
+        InternetAddress(target),
+        _syncPort,
+      );
+    } catch (_) {}
   }
 
   void _handleDiscoveryDatagram(Datagram datagram) {
@@ -1717,6 +2345,10 @@ class _ClipboardHomePageState extends State<ClipboardHomePage> {
           : datagram.address.address;
       final portValue = decoded['port'];
       final port = portValue is int ? portValue : int.tryParse('$portValue');
+      final filePortValue = decoded['filePort'];
+      final filePort = filePortValue is int
+          ? filePortValue
+          : int.tryParse('$filePortValue');
       if (!_isUsableLanIpv4(host) ||
           port == null ||
           port <= 0 ||
@@ -1731,9 +2363,13 @@ class _ClipboardHomePageState extends State<ClipboardHomePage> {
             : deviceName,
         host: host,
         port: port,
+        filePort: filePort == null || filePort <= 0 || filePort > 65535
+            ? _defaultFileTransferPort
+            : filePort,
         lastSeenAt: DateTime.now(),
       );
       _rememberDiscoveredDevice(discovered);
+      unawaited(_sendDiscoveryReply(datagram.address.address));
     } catch (_) {}
   }
 
@@ -1744,10 +2380,13 @@ class _ClipboardHomePageState extends State<ClipboardHomePage> {
       _discoveredDevices = {..._discoveredDevices, device.id: device};
       if (peerIndex >= 0) {
         final peer = _peers[peerIndex];
-        if (peer.host != device.host || peer.port != device.port) {
+        if (peer.host != device.host ||
+            peer.port != device.port ||
+            peer.filePort != device.filePort) {
           _peers[peerIndex] = peer.copyWith(
             host: device.host,
             port: device.port,
+            filePort: device.filePort,
             clearError: true,
           );
           shouldSavePeers = true;
@@ -1759,7 +2398,13 @@ class _ClipboardHomePageState extends State<ClipboardHomePage> {
   }
 
   void _pruneStaleDiscoveredDevices() {
-    final cutoff = DateTime.now().subtract(const Duration(seconds: 18));
+    final now = DateTime.now();
+    if (now.difference(_lastDiscoveredDevicePruneAt) <
+        _discoveredDevicePruneInterval) {
+      return;
+    }
+    _lastDiscoveredDevicePruneAt = now;
+    final cutoff = now.subtract(_discoveredDeviceCacheWindow);
     final freshDevices = Map<String, DiscoveredSyncDevice>.fromEntries(
       _discoveredDevices.entries.where(
         (entry) => entry.value.lastSeenAt.isAfter(cutoff),
@@ -1897,6 +2542,7 @@ class _ClipboardHomePageState extends State<ClipboardHomePage> {
       'deviceName': _syncIdentity.deviceName,
       'host': _syncHost,
       'port': _syncPort,
+      'filePort': _defaultFileTransferPort,
       'pairCode': _syncIdentity.pairCode,
       'tagDefinitions': _tagDefinitionsPayload(),
       'deletedItems': _syncTombstonesPayload(),
@@ -1914,6 +2560,7 @@ class _ClipboardHomePageState extends State<ClipboardHomePage> {
       'deviceName': _syncIdentity.deviceName,
       'host': _syncHost,
       'port': _syncPort,
+      'filePort': _defaultFileTransferPort,
       'pairCode': _syncIdentity.pairCode,
       'deletedItems': _syncTombstonesPayload(),
     };
@@ -2010,6 +2657,10 @@ class _ClipboardHomePageState extends State<ClipboardHomePage> {
     final host = _isUsableLanIpv4(remoteHost ?? '') ? remoteHost! : socketHost;
     final portValue = request['port'];
     final port = portValue is int ? portValue : int.tryParse('$portValue');
+    final filePortValue = request['filePort'];
+    final filePort = filePortValue is int
+        ? filePortValue
+        : int.tryParse('$filePortValue');
     final pairCode = request['pairCode']?.toString().trim().toUpperCase();
     if (!_isUsableLanIpv4(host) ||
         port == null ||
@@ -2027,6 +2678,9 @@ class _ClipboardHomePageState extends State<ClipboardHomePage> {
       host: host,
       port: port,
       pairCode: pairCode,
+      filePort: filePort == null || filePort <= 0 || filePort > 65535
+          ? _defaultFileTransferPort
+          : filePort,
     );
     final existingPeer = _peers.any((item) => item.id == peer.id);
     final accepted = existingPeer || (await _confirmIncomingPairRequest(peer));
@@ -2091,6 +2745,10 @@ class _ClipboardHomePageState extends State<ClipboardHomePage> {
         : fallbackSocketHost;
     final portValue = payload['port'];
     final port = portValue is int ? portValue : int.tryParse('$portValue');
+    final filePortValue = payload['filePort'];
+    final filePort = filePortValue is int
+        ? filePortValue
+        : int.tryParse('$filePortValue');
     final pairCode = payload['pairCode']?.toString().trim().toUpperCase();
 
     final updated = current.copyWith(
@@ -2098,6 +2756,9 @@ class _ClipboardHomePageState extends State<ClipboardHomePage> {
       name: remoteName == null || remoteName.isEmpty ? null : remoteName,
       host: host != null && _isUsableLanIpv4(host) ? host : null,
       port: port != null && port > 0 && port <= 65535 ? port : null,
+      filePort: filePort != null && filePort > 0 && filePort <= 65535
+          ? filePort
+          : null,
       pairCode: pairCode != null && pairCode.length >= 6 ? pairCode : null,
       lastSyncedAt: markSynced ? DateTime.now() : null,
       clearError: true,
@@ -2107,11 +2768,32 @@ class _ClipboardHomePageState extends State<ClipboardHomePage> {
         updated.name != current.name ||
         updated.host != current.host ||
         updated.port != current.port ||
+        updated.filePort != current.filePort ||
         updated.pairCode != current.pairCode ||
         updated.lastSyncedAt != current.lastSyncedAt ||
         updated.lastError != current.lastError;
     if (changed) _peers[index] = updated;
+    _rememberReachablePeer(updated);
     return changed;
+  }
+
+  void _rememberReachablePeer(SyncPeer peer) {
+    if (!_isUsableLanIpv4(peer.host)) return;
+    final device = DiscoveredSyncDevice(
+      id: peer.id,
+      name: peer.name,
+      host: peer.host,
+      port: peer.port,
+      filePort: peer.filePort,
+      lastSeenAt: DateTime.now(),
+    );
+    if (mounted) {
+      setState(() {
+        _discoveredDevices = {..._discoveredDevices, device.id: device};
+      });
+    } else {
+      _discoveredDevices = {..._discoveredDevices, device.id: device};
+    }
   }
 
   Future<void> _mergeSyncedEntries(
@@ -2189,14 +2871,30 @@ class _ClipboardHomePageState extends State<ClipboardHomePage> {
         touchExisting &&
         newestRealtimeBody != null &&
         newestRealtimeBody.isNotEmpty) {
-      await Clipboard.setData(ClipboardData(text: newestRealtimeBody));
-      _lastClipboardText = newestRealtimeBody;
+      await _setSyncedClipboardText(newestRealtimeBody);
     }
 
     if (!changed) return;
     await storage.applyRetention(maxItems: _clipboardSettings.retentionLimit);
     await _loadEntries(captureCurrentClipboard: false);
     if (mounted) setState(() {});
+  }
+
+  Future<void> _setSyncedClipboardText(String text) async {
+    try {
+      if (Platform.isAndroid) {
+        final ok = await _platformChannel.invokeMethod<bool>(
+          'setAndroidClipboardText',
+          {'text': text},
+        );
+        if (ok == true) {
+          _lastClipboardText = text;
+        }
+        return;
+      }
+      await Clipboard.setData(ClipboardData(text: text));
+      _lastClipboardText = text;
+    } catch (_) {}
   }
 
   List<Map<String, dynamic>> _syncTombstonesPayload([
@@ -2552,13 +3250,1269 @@ class _ClipboardHomePageState extends State<ClipboardHomePage> {
     });
   }
 
+  Future<void> _loadFileTransfers() async {
+    try {
+      final file = await _fileTransfersFile();
+      if (!await file.exists()) return;
+      final decoded = jsonDecode(await file.readAsString());
+      if (decoded is! List<dynamic>) return;
+      final records = decoded
+          .whereType<Map<String, dynamic>>()
+          .map(FileTransferRecord.fromJson)
+          .map((record) {
+            if (!_isActiveTransferStatus(record.status)) return record;
+            return record.copyWith(
+              status: FileTransferStatus.failed,
+              error: 'App đã đóng trước khi hoàn tất.',
+            );
+          })
+          .toList();
+      if (mounted) {
+        setState(() => _fileTransfers = records);
+      } else {
+        _fileTransfers = records;
+      }
+    } catch (_) {
+      _fileTransfers = [];
+    }
+  }
+
+  Future<void> _saveFileTransfers() async {
+    final file = await _fileTransfersFile();
+    await file.parent.create(recursive: true);
+    const encoder = JsonEncoder.withIndent('  ');
+    final records = List<FileTransferRecord>.from(_fileTransfers)
+      ..sort((a, b) => b.createdAt.compareTo(a.createdAt));
+    await file.writeAsString(
+      encoder.convert(
+        records.take(60).map((record) => record.toJson()).toList(),
+      ),
+    );
+  }
+
+  void _upsertFileTransfer(FileTransferRecord record) {
+    if (!mounted) {
+      final index = _fileTransfers.indexWhere((item) => item.id == record.id);
+      if (index >= 0) {
+        _fileTransfers[index] = record;
+      } else {
+        _fileTransfers = [record, ..._fileTransfers].take(60).toList();
+      }
+      unawaited(_saveFileTransfers());
+      return;
+    }
+    setState(() {
+      final index = _fileTransfers.indexWhere((item) => item.id == record.id);
+      if (index >= 0) {
+        _fileTransfers[index] = record;
+      } else {
+        _fileTransfers = [record, ..._fileTransfers].take(60).toList();
+      }
+    });
+    unawaited(_saveFileTransfers());
+  }
+
+  void _updateFileTransfer(
+    String id, {
+    FileTransferStatus? status,
+    int? transferredBytes,
+    String? error,
+    String? saveDirectory,
+  }) {
+    final index = _fileTransfers.indexWhere((record) => record.id == id);
+    if (index < 0) return;
+    final current = _fileTransfers[index];
+    int? speedBytesPerSecond;
+    final nextStatus = status ?? current.status;
+    if (transferredBytes != null && _isActiveTransferStatus(nextStatus)) {
+      final now = DateTime.now();
+      final previous = _fileTransferSpeedSamples[id];
+      if (previous != null) {
+        final elapsedMs = now.difference(previous.at).inMilliseconds;
+        final deltaBytes = transferredBytes - previous.bytes;
+        if (elapsedMs > 0 && deltaBytes >= 0) {
+          final instantSpeed = (deltaBytes * 1000 / elapsedMs).round();
+          final previousSpeed = current.speedBytesPerSecond;
+          speedBytesPerSecond = previousSpeed <= 0
+              ? instantSpeed
+              : (previousSpeed * 0.65 + instantSpeed * 0.35).round();
+        }
+      }
+      _fileTransferSpeedSamples[id] = (bytes: transferredBytes, at: now);
+    }
+    if (status != null && !_isActiveTransferStatus(status)) {
+      speedBytesPerSecond = 0;
+      _fileTransferSpeedSamples.remove(id);
+    }
+    final updated = _fileTransfers[index].copyWith(
+      status: status,
+      transferredBytes: transferredBytes,
+      speedBytesPerSecond: speedBytesPerSecond,
+      error: error,
+      saveDirectory: saveDirectory,
+    );
+    _upsertFileTransfer(updated);
+  }
+
+  void _updateFileTransferSavedPath(
+    String id, {
+    required int index,
+    required String savedPath,
+  }) {
+    final recordIndex = _fileTransfers.indexWhere((record) => record.id == id);
+    if (recordIndex < 0) return;
+    final current = _fileTransfers[recordIndex];
+    if (index < 0 || index >= current.files.length) return;
+    final files = List<FileTransferFile>.from(current.files);
+    files[index] = files[index].copyWith(savedPath: savedPath);
+    _upsertFileTransfer(current.copyWith(files: files));
+  }
+
+  Future<void> _clearFinishedFileTransferHistory() async {
+    final removableCount = _fileTransfers
+        .where((transfer) => !_isActiveTransferStatus(transfer.status))
+        .length;
+    if (removableCount == 0) return;
+    final accepted = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('Dọn lịch sử gửi nhận'),
+        content: Text(
+          'Xóa $removableCount hoạt động gửi nhận đã kết thúc khỏi lịch sử.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(false),
+            child: const Text('Hủy'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(context).pop(true),
+            child: const Text('Dọn'),
+          ),
+        ],
+      ),
+    );
+    if (accepted != true || !mounted) return;
+    setState(() {
+      _fileTransfers = _fileTransfers
+          .where((transfer) => _isActiveTransferStatus(transfer.status))
+          .toList();
+      if (_fileTransferStatusFilter != null) {
+        _fileTransferStatusFilter = null;
+      }
+    });
+    unawaited(_saveFileTransfers());
+  }
+
+  List<SyncPeer> get _onlineFileTransferPeers {
+    final cutoff = DateTime.now().subtract(_discoveredDeviceOnlineWindow);
+    final onlinePeers = _peers.where((peer) {
+      final discovered = _discoveredDevices[peer.id];
+      if (discovered != null && discovered.lastSeenAt.isAfter(cutoff)) {
+        return true;
+      }
+      return peer.lastError == null &&
+          peer.lastSyncedAt != null &&
+          peer.lastSyncedAt!.isAfter(cutoff);
+    });
+    return onlinePeers.map((peer) {
+        final discovered = _discoveredDevices[peer.id];
+        if (discovered == null) return peer;
+        return peer.copyWith(
+          host: discovered.host,
+          port: discovered.port,
+          filePort: discovered.filePort,
+          clearError: true,
+        );
+      }).toList()
+      ..sort((a, b) => a.name.toLowerCase().compareTo(b.name.toLowerCase()));
+  }
+
+  Future<Directory> _receivedFilesDirectory() async {
+    if (Platform.isAndroid) {
+      return Directory('Download${Platform.pathSeparator}OpenCB');
+    }
+    final downloads = await getDownloadsDirectory();
+    final base = downloads ?? await _opencbDataDirectory();
+    final dir = Directory('${base.path}${Platform.pathSeparator}OpenCB');
+    await dir.create(recursive: true);
+    return dir;
+  }
+
+  Future<(String, String)> _openPublicDownloadFile(
+    String name, {
+    String? relativePath,
+  }) async {
+    final response = await _platformChannel.invokeMapMethod<String, String>(
+      'openPublicDownloadFile',
+      relativePath == null
+          ? {'name': name}
+          : {'name': name, 'relativePath': relativePath},
+    );
+    final token = response?['token'];
+    final path = response?['path'] ?? 'Download/OpenCB/${_safeFileName(name)}';
+    if (token == null || token.isEmpty) {
+      throw const FileSystemException('Không tạo được file trong Downloads');
+    }
+    return (token, path);
+  }
+
+  Future<void> _writePublicDownloadChunk(String? token, Uint8List bytes) async {
+    if (token == null || token.isEmpty) {
+      throw const FileSystemException('Download stream chưa mở');
+    }
+    await _platformChannel.invokeMethod<bool>('writePublicDownloadChunk', {
+      'token': token,
+      'bytes': bytes,
+    });
+  }
+
+  Future<void> _finishPublicDownloadFile(String? token) async {
+    if (token == null || token.isEmpty) return;
+    await _platformChannel.invokeMethod<bool>('finishPublicDownloadFile', {
+      'token': token,
+    });
+  }
+
+  Future<void> _cancelPublicDownloadFile(String? token) async {
+    if (token == null || token.isEmpty) return;
+    await _platformChannel.invokeMethod<bool>('cancelPublicDownloadFile', {
+      'token': token,
+    });
+  }
+
+  Future<File> _uniqueReceivedFile(
+    Directory directory,
+    String name, {
+    String? relativePath,
+  }) async {
+    final safeRelativePath = _safeRelativeFilePath(relativePath ?? name);
+    final safeName = _safeFileName(
+      safeRelativePath.split(RegExp(r'[\\/]+')).last,
+    );
+    final relativeParts = safeRelativePath
+        .split(RegExp(r'[\\/]+'))
+        .where((part) => part.trim().isNotEmpty)
+        .toList();
+    final parentParts = relativeParts.length <= 1
+        ? const <String>[]
+        : relativeParts.sublist(0, relativeParts.length - 1);
+    var targetDirectory = directory;
+    for (final part in parentParts) {
+      targetDirectory = Directory(
+        '${targetDirectory.path}${Platform.pathSeparator}${_safeFileName(part)}',
+      );
+    }
+    await targetDirectory.create(recursive: true);
+    final separator = Platform.pathSeparator;
+    var candidate = File('${targetDirectory.path}$separator$safeName');
+    if (!await candidate.exists()) return candidate;
+    final dotIndex = safeName.lastIndexOf('.');
+    final stem = dotIndex <= 0 ? safeName : safeName.substring(0, dotIndex);
+    final extension = dotIndex <= 0 ? '' : safeName.substring(dotIndex);
+    for (var index = 1; index < 10000; index += 1) {
+      candidate = File(
+        '${targetDirectory.path}$separator$stem ($index)$extension',
+      );
+      if (!await candidate.exists()) return candidate;
+    }
+    return File(
+      '${targetDirectory.path}$separator$stem-${DateTime.now().millisecondsSinceEpoch}$extension',
+    );
+  }
+
+  Future<bool> _confirmIncomingFileOffer(FileTransferRecord record) async {
+    if (Platform.isAndroid && !_appInForeground) {
+      final decision = Completer<bool>();
+      _pendingFileOfferDecisions[record.id] = decision;
+      _pendingFileOfferRecords[record.id] = record;
+      final shown = await _showAndroidBackgroundNotification(
+        title: 'Có file gửi tới OpenCB',
+        body:
+            '${record.peerName} muốn gửi ${record.files.length} file (${_formatBytes(record.totalBytes)}).',
+        transferId: record.id,
+        showFileOfferActions: true,
+      );
+      if (!shown) {
+        _pendingFileOfferDecisions.remove(record.id);
+        _pendingFileOfferRecords.remove(record.id);
+        return false;
+      }
+      try {
+        return await decision.future.timeout(
+          const Duration(minutes: 5),
+          onTimeout: () => false,
+        );
+      } finally {
+        _pendingFileOfferDecisions.remove(record.id);
+        _pendingFileOfferRecords.remove(record.id);
+      }
+    }
+    return _showIncomingFileOfferDialog(record);
+  }
+
+  Future<bool> _showIncomingFileOfferDialog(FileTransferRecord record) async {
+    if (!mounted) return false;
+    final accepted = await showDialog<bool>(
+      context: context,
+      builder: (context) {
+        final colorScheme = Theme.of(context).colorScheme;
+        return AlertDialog(
+          title: const Text('Nhận file?'),
+          content: ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: 420),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  '${record.peerName} muốn gửi ${record.files.length} file (${_formatBytes(record.totalBytes)}).',
+                ),
+                const SizedBox(height: 14),
+                DecoratedBox(
+                  decoration: BoxDecoration(
+                    color: colorScheme.surfaceContainerHighest,
+                    borderRadius: BorderRadius.circular(12),
+                  ),
+                  child: Padding(
+                    padding: const EdgeInsets.all(10),
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        for (final file in record.files.take(4))
+                          ListTile(
+                            dense: true,
+                            contentPadding: EdgeInsets.zero,
+                            leading: const Icon(
+                              Icons.insert_drive_file_outlined,
+                            ),
+                            title: Text(
+                              file.displayPath,
+                              maxLines: 1,
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                            trailing: Text(_formatBytes(file.size)),
+                          ),
+                        if (record.files.length > 4)
+                          Align(
+                            alignment: Alignment.centerLeft,
+                            child: Text(
+                              '+${record.files.length - 4} file khác',
+                              style: Theme.of(context).textTheme.bodySmall,
+                            ),
+                          ),
+                      ],
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(context).pop(false),
+              child: const Text('Từ chối'),
+            ),
+            FilledButton.icon(
+              onPressed: () => Navigator.of(context).pop(true),
+              icon: const Icon(Icons.file_download_outlined),
+              label: const Text('Nhận'),
+            ),
+          ],
+        );
+      },
+    );
+    return accepted ?? false;
+  }
+
+  Future<void> _showNextPendingFileOfferDialog() async {
+    if (_showingPendingFileOfferDialog || _pendingFileOfferRecords.isEmpty) {
+      return;
+    }
+    final transferId = _pendingFileOfferRecords.keys.first;
+    await _showPendingFileOfferDialog(transferId);
+  }
+
+  Future<void> _showPendingFileOfferDialog(String transferId) async {
+    if (_showingPendingFileOfferDialog || !mounted) return;
+    final record = _pendingFileOfferRecords[transferId];
+    final completer = _pendingFileOfferDecisions[transferId];
+    if (record == null || completer == null || completer.isCompleted) return;
+    _showingPendingFileOfferDialog = true;
+    try {
+      final accepted = await _showIncomingFileOfferDialog(record);
+      _pendingFileOfferDecisions.remove(transferId);
+      _pendingFileOfferRecords.remove(transferId);
+      if (!completer.isCompleted) completer.complete(accepted);
+    } finally {
+      _showingPendingFileOfferDialog = false;
+    }
+  }
+
+  Future<void> _stageSharedFiles(dynamic rawFiles) async {
+    final items = rawFiles is List ? rawFiles : const [];
+    final files = <FileTransferFile>[];
+    for (final item in items) {
+      if (item is! Map) continue;
+      final path = item['path']?.toString();
+      final uri = item['uri']?.toString();
+      if ((path == null || path.trim().isEmpty) &&
+          (uri == null || uri.trim().isEmpty)) {
+        continue;
+      }
+      final sizeValue = item['size'];
+      var size = sizeValue is int ? sizeValue : int.tryParse('$sizeValue') ?? 0;
+      if (size <= 0 && path != null && path.trim().isNotEmpty) {
+        final file = File(path);
+        if (!await file.exists()) continue;
+        size = await file.length();
+      }
+      if (size < 0) continue;
+      final name = item['name']?.toString().trim();
+      files.add(
+        FileTransferFile(
+          name: name == null || name.isEmpty
+              ? _fileNameFromPath(path ?? uri ?? 'file')
+              : name,
+          size: size,
+          path: path,
+          uri: uri,
+          relativePath: item['relativePath']?.toString(),
+        ),
+      );
+    }
+    if (files.isEmpty) return;
+    if (mounted) {
+      setState(() {
+        _selectedTransferFiles = _mergeTransferFiles(
+          _selectedTransferFiles,
+          files,
+        );
+        _section = 'Gửi file';
+        _selectedIndex = 0;
+        _mobileSearchOpen = false;
+      });
+      _syncMobilePageToSection('Gửi file');
+    } else {
+      _selectedTransferFiles = _mergeTransferFiles(
+        _selectedTransferFiles,
+        files,
+      );
+      _section = 'Gửi file';
+    }
+  }
+
+  Future<void> _pickTransferFiles() async {
+    if (Platform.isAndroid) {
+      final result = await _platformChannel.invokeMethod<List<dynamic>>(
+        'pickAndroidFiles',
+      );
+      if (result == null || result.isEmpty) return;
+      await _stageSharedFiles(result);
+      return;
+    }
+    final result = await FilePicker.platform.pickFiles(
+      allowMultiple: true,
+      withData: false,
+      lockParentWindow: true,
+    );
+    final paths =
+        result?.paths
+            .whereType<String>()
+            .where((path) => path.trim().isNotEmpty)
+            .toList() ??
+        const <String>[];
+    if (paths.isEmpty) return;
+    await _addTransferPaths(paths);
+  }
+
+  Future<void> _pickTransferFolder() async {
+    final path = await FilePicker.platform.getDirectoryPath(
+      lockParentWindow: true,
+      dialogTitle: 'Chọn folder để gửi',
+    );
+    if (path == null || path.trim().isEmpty) return;
+    await _addTransferPaths([path]);
+  }
+
+  Future<void> _addTransferPaths(List<String> paths) async {
+    final files = <FileTransferFile>[];
+    for (final path in paths) {
+      final file = File(path);
+      final directory = Directory(path);
+      if (await file.exists()) {
+        files.add(
+          FileTransferFile(
+            name: _fileNameFromPath(path),
+            size: await file.length(),
+            path: path,
+          ),
+        );
+        continue;
+      }
+      if (await directory.exists()) {
+        files.addAll(await _filesFromDirectory(directory));
+      }
+    }
+    if (files.isEmpty) {
+      _showCenterSnackBar('Không đọc được file hoặc folder đã chọn.');
+      return;
+    }
+    setState(() {
+      _selectedTransferFiles = _mergeTransferFiles(
+        _selectedTransferFiles,
+        files,
+      );
+    });
+  }
+
+  Future<List<FileTransferFile>> _filesFromDirectory(
+    Directory directory,
+  ) async {
+    final rootName = _safeFileName(_fileNameFromPath(directory.path));
+    final rootPath = directory.absolute.path;
+    final files = <FileTransferFile>[];
+    await for (final entity in directory.list(
+      recursive: true,
+      followLinks: false,
+    )) {
+      if (entity is! File) continue;
+      final path = entity.absolute.path;
+      final relativePath = path
+          .substring(math.min(rootPath.length, path.length))
+          .replaceFirst(RegExp(r'^[\\/]+'), '');
+      final safeRelativePath = _safeRelativeFilePath('$rootName/$relativePath');
+      files.add(
+        FileTransferFile(
+          name: _fileNameFromPath(path),
+          size: await entity.length(),
+          path: path,
+          relativePath: safeRelativePath,
+        ),
+      );
+    }
+    return files;
+  }
+
+  List<FileTransferFile> _mergeTransferFiles(
+    List<FileTransferFile> current,
+    List<FileTransferFile> incoming,
+  ) {
+    final byKey = <String, FileTransferFile>{
+      for (final file in current)
+        '${file.path ?? file.uri ?? file.displayPath}|${file.size}': file,
+    };
+    for (final file in incoming) {
+      byKey['${file.path ?? file.uri ?? file.displayPath}|${file.size}'] = file;
+    }
+    return byKey.values.toList()..sort(
+      (a, b) =>
+          a.displayPath.toLowerCase().compareTo(b.displayPath.toLowerCase()),
+    );
+  }
+
+  void _removeSelectedTransferFile(FileTransferFile file) {
+    setState(() {
+      _selectedTransferFiles = _selectedTransferFiles
+          .where(
+            (item) =>
+                item.path != file.path ||
+                item.uri != file.uri ||
+                item.displayPath != file.displayPath ||
+                item.size != file.size,
+          )
+          .toList();
+    });
+  }
+
+  void _clearSelectedTransferFiles() {
+    setState(() {
+      _selectedTransferFiles = [];
+      _fileTransferTargetIds.clear();
+    });
+  }
+
+  void _toggleFileTransferTarget(String peerId) {
+    setState(() {
+      if (!_fileTransferTargetIds.add(peerId)) {
+        _fileTransferTargetIds.remove(peerId);
+      }
+    });
+  }
+
+  void _toggleAllFileTransferTargets() {
+    final onlineIds = _onlineFileTransferPeers.map((peer) => peer.id).toSet();
+    setState(() {
+      if (onlineIds.isEmpty) return;
+      if (_fileTransferTargetIds.containsAll(onlineIds)) {
+        _fileTransferTargetIds.removeAll(onlineIds);
+      } else {
+        _fileTransferTargetIds
+          ..removeWhere((id) => !onlineIds.contains(id))
+          ..addAll(onlineIds);
+      }
+    });
+  }
+
+  Future<void> _sendSelectedFilesToTargets() async {
+    final files = List<FileTransferFile>.from(_selectedTransferFiles);
+    final peers = _onlineFileTransferPeers
+        .where((peer) => _fileTransferTargetIds.contains(peer.id))
+        .toList();
+    if (files.isEmpty) {
+      _showCenterSnackBar('Chọn file hoặc folder trước.');
+      return;
+    }
+    if (peers.isEmpty) {
+      _showCenterSnackBar('Chọn ít nhất một thiết bị online.');
+      return;
+    }
+    final results = await Future.wait([
+      for (final peer in peers) _sendFilesToPeer(peer, files),
+    ]);
+    final completedCount = results
+        .where((status) => status == FileTransferStatus.completed)
+        .length;
+    if (completedCount == peers.length) {
+      if (!mounted) return;
+      setState(() {
+        _selectedTransferFiles = [];
+        _fileTransferTargetIds.clear();
+      });
+      _showCenterSnackBar(
+        peers.length == 1
+            ? 'Đã gửi file thành công.'
+            : 'Đã gửi file tới ${peers.length} thiết bị.',
+        success: true,
+        maxWidth: 360,
+        duration: const Duration(seconds: 2),
+      );
+    } else if (completedCount > 0) {
+      _showCenterSnackBar(
+        'Đã gửi xong $completedCount/${peers.length} thiết bị.',
+        maxWidth: 360,
+      );
+    }
+  }
+
+  Future<FileTransferStatus> _sendFilesToPeer(
+    SyncPeer peer,
+    List<FileTransferFile> selectedFiles,
+  ) async {
+    final files = selectedFiles
+        .where(
+          (file) =>
+              (file.path != null && file.path!.trim().isNotEmpty) ||
+              (file.uri != null && file.uri!.trim().isNotEmpty),
+        )
+        .toList();
+    if (files.isEmpty) {
+      _showCenterSnackBar('Không đọc được file đã chọn.');
+      return FileTransferStatus.failed;
+    }
+
+    final transferId = _generateTransferId();
+    final totalBytes = files.fold<int>(0, (sum, file) => sum + file.size);
+    final record = FileTransferRecord(
+      id: transferId,
+      peerId: peer.id,
+      peerName: peer.name,
+      direction: FileTransferDirection.send,
+      status: FileTransferStatus.waiting,
+      files: files,
+      totalBytes: totalBytes,
+      transferredBytes: 0,
+      createdAt: DateTime.now(),
+    );
+    _upsertFileTransfer(record);
+
+    Socket? socket;
+    try {
+      socket = await Socket.connect(
+        peer.host,
+        peer.filePort,
+        timeout: const Duration(seconds: 4),
+      );
+      _activeFileTransferSockets[transferId] = socket;
+      socket.writeln(
+        jsonEncode({
+          'protocol': _fileTransferProtocol,
+          'action': 'fileOffer',
+          'transferId': transferId,
+          'deviceId': _syncIdentity.deviceId,
+          'deviceName': _syncIdentity.deviceName,
+          'targetPairCode': peer.pairCode.trim().toUpperCase(),
+          'files': files
+              .map(
+                (file) => {
+                  'name': file.name,
+                  'size': file.size,
+                  if (file.relativePath != null)
+                    'relativePath': file.relativePath,
+                },
+              )
+              .toList(),
+          'totalBytes': totalBytes,
+        }),
+      );
+      await socket.flush();
+      final reader = _SocketFrameReader(socket);
+      final ack = await reader.readJson(timeout: const Duration(minutes: 2));
+      if (ack['action'] == 'fileRejected') {
+        _updateFileTransfer(transferId, status: FileTransferStatus.rejected);
+        return FileTransferStatus.rejected;
+      }
+      if (ack['action'] != 'fileAccepted') {
+        throw const FormatException('Thiết bị nhận không xác nhận file.');
+      }
+      _updateFileTransfer(transferId, status: FileTransferStatus.sending);
+
+      Completer<void>? fileStoredWaiter;
+      final transferStoredWaiter = Completer<void>();
+      Object? controlError;
+      final controlLoop = () async {
+        try {
+          while (true) {
+            final message = await reader.readJson(
+              timeout: const Duration(minutes: 10),
+            );
+            final action = message['action']?.toString();
+            if (action == 'transferProgress') {
+              final remoteBytesValue = message['transferredBytes'];
+              final remoteBytes = remoteBytesValue is int
+                  ? remoteBytesValue
+                  : int.tryParse('$remoteBytesValue');
+              if (remoteBytes != null) {
+                _updateFileTransfer(
+                  transferId,
+                  transferredBytes: remoteBytes.clamp(0, totalBytes).toInt(),
+                );
+              }
+              continue;
+            }
+            if (action == 'fileStored') {
+              final waiter = fileStoredWaiter;
+              if (waiter != null && !waiter.isCompleted) {
+                waiter.complete();
+              }
+              continue;
+            }
+            if (action == 'transferStored') {
+              if (!transferStoredWaiter.isCompleted) {
+                transferStoredWaiter.complete();
+              }
+              return;
+            }
+            if (message['error'] != null) {
+              throw Exception(message['error']);
+            }
+          }
+        } catch (error) {
+          controlError = error;
+          final waiter = fileStoredWaiter;
+          if (waiter != null && !waiter.isCompleted) {
+            waiter.completeError(error);
+          }
+          if (!transferStoredWaiter.isCompleted) {
+            transferStoredWaiter.completeError(error);
+          }
+        }
+      }();
+
+      for (var index = 0; index < files.length; index += 1) {
+        if (_canceledFileTransferIds.contains(transferId)) {
+          throw const _FileTransferCanceledException();
+        }
+        final transferFile = files[index];
+        if (transferFile.path == null && transferFile.uri == null) continue;
+        socket.writeln(
+          jsonEncode({
+            'protocol': _fileTransferProtocol,
+            'action': 'fileStart',
+            'transferId': transferId,
+            'index': index,
+            'name': transferFile.name,
+            if (transferFile.relativePath != null)
+              'relativePath': transferFile.relativePath,
+            'size': transferFile.size,
+          }),
+        );
+        await socket.flush();
+        await _streamTransferFileToSocket(
+          transferFile,
+          socket,
+          transferId: transferId,
+        );
+        await socket.flush();
+        final currentFileStoredWaiter = Completer<void>();
+        fileStoredWaiter = currentFileStoredWaiter;
+        socket.writeln(
+          jsonEncode({
+            'protocol': _fileTransferProtocol,
+            'action': 'fileEnd',
+            'transferId': transferId,
+            'index': index,
+          }),
+        );
+        await socket.flush();
+        await currentFileStoredWaiter.future.timeout(
+          const Duration(minutes: 2),
+        );
+        fileStoredWaiter = null;
+        if (controlError != null) throw controlError!;
+      }
+      socket.writeln(
+        jsonEncode({
+          'protocol': _fileTransferProtocol,
+          'action': 'transferComplete',
+          'transferId': transferId,
+        }),
+      );
+      await socket.flush();
+      await transferStoredWaiter.future.timeout(const Duration(minutes: 2));
+      if (controlError != null) throw controlError!;
+      await controlLoop.catchError((_) {});
+      _updateFileTransfer(
+        transferId,
+        status: FileTransferStatus.completed,
+        transferredBytes: totalBytes,
+      );
+      return FileTransferStatus.completed;
+    } on _FileTransferCanceledException {
+      _updateFileTransfer(transferId, status: FileTransferStatus.canceled);
+      return FileTransferStatus.canceled;
+    } catch (error) {
+      _updateFileTransfer(
+        transferId,
+        status: FileTransferStatus.failed,
+        error: _friendlySyncError(error),
+      );
+      return FileTransferStatus.failed;
+    } finally {
+      _activeFileTransferSockets.remove(transferId);
+      _canceledFileTransferIds.remove(transferId);
+      await socket?.close().catchError((_) {});
+    }
+  }
+
+  Future<void> _streamTransferFileToSocket(
+    FileTransferFile transferFile,
+    Socket socket, {
+    required String transferId,
+  }) async {
+    final path = transferFile.path;
+    if (path != null && path.trim().isNotEmpty) {
+      await for (final chunk in File(path).openRead()) {
+        if (_canceledFileTransferIds.contains(transferId)) {
+          throw const _FileTransferCanceledException();
+        }
+        socket.add(chunk);
+      }
+      return;
+    }
+
+    final uri = transferFile.uri;
+    if (uri == null || uri.trim().isEmpty) {
+      throw const FileSystemException('Không có nguồn file để gửi');
+    }
+    final token = await _platformChannel.invokeMethod<String>(
+      'openContentInputStream',
+      {'uri': uri},
+    );
+    if (token == null || token.isEmpty) {
+      throw const FileSystemException('Không mở được file Android');
+    }
+    try {
+      while (true) {
+        if (_canceledFileTransferIds.contains(transferId)) {
+          throw const _FileTransferCanceledException();
+        }
+        final chunk = await _platformChannel.invokeMethod<Uint8List>(
+          'readContentInputChunk',
+          {'token': token, 'size': _androidContentReadChunkBytes},
+        );
+        if (chunk == null || chunk.isEmpty) break;
+        socket.add(chunk);
+        if (chunk.length < _androidContentReadChunkBytes) break;
+      }
+    } finally {
+      await _platformChannel
+          .invokeMethod<bool>('closeContentInputStream', {'token': token})
+          .catchError((_) => false);
+    }
+  }
+
+  Future<void> _handleFileTransferSocket(Socket socket) async {
+    FileTransferRecord? record;
+    IOSink? sink;
+    File? tempFile;
+    File? finalFile;
+    String? publicDownloadToken;
+    BytesBuilder? publicDownloadBuffer;
+    var publicDownloadBufferedBytes = 0;
+    var transferred = 0;
+    var accepted = false;
+    var lastProgressUpdate = DateTime.fromMillisecondsSinceEpoch(0);
+    Future<void> updateReceiveProgress(
+      String transferId, {
+      bool force = false,
+    }) async {
+      final now = DateTime.now();
+      if (!force &&
+          now.difference(lastProgressUpdate) <
+              const Duration(milliseconds: 120)) {
+        return;
+      }
+      lastProgressUpdate = now;
+      _updateFileTransfer(transferId, transferredBytes: transferred);
+      socket.writeln(
+        jsonEncode({
+          'protocol': _fileTransferProtocol,
+          'action': 'transferProgress',
+          'transferId': transferId,
+          'transferredBytes': transferred,
+          'totalBytes': record?.totalBytes ?? 0,
+        }),
+      );
+      await socket.flush();
+    }
+
+    Future<void> flushPublicDownloadBuffer() async {
+      final token = publicDownloadToken;
+      final buffer = publicDownloadBuffer;
+      if (token == null || buffer == null || publicDownloadBufferedBytes == 0) {
+        return;
+      }
+      final bytes = buffer.takeBytes();
+      publicDownloadBufferedBytes = 0;
+      await _writePublicDownloadChunk(token, bytes);
+    }
+
+    try {
+      final reader = _SocketFrameReader(socket);
+      while (true) {
+        final message = await reader.readJson();
+        if (message['protocol'] != _fileTransferProtocol) {
+          throw const FormatException('Giao thức file không được hỗ trợ.');
+        }
+        final action = message['action']?.toString();
+        if (action == 'fileOffer') {
+          if (!_isTrustedSyncRequest(message)) {
+            throw const FormatException('Thiết bị gửi file chưa tin cậy.');
+          }
+          final remoteDeviceId = message['deviceId']?.toString().trim() ?? '';
+          final remoteDeviceName =
+              message['deviceName']?.toString().trim() ?? 'Thiết bị LAN';
+          final files = (message['files'] as List<dynamic>? ?? const [])
+              .whereType<Map<String, dynamic>>()
+              .map(FileTransferFile.fromJson)
+              .toList();
+          if (remoteDeviceId.isEmpty || files.isEmpty) {
+            throw const FormatException('Offer file không hợp lệ.');
+          }
+          final totalBytes =
+              message['totalBytes'] as int? ??
+              files.fold<int>(0, (sum, file) => sum + file.size);
+          final transferId =
+              message['transferId']?.toString() ?? _generateTransferId();
+          record = FileTransferRecord(
+            id: transferId,
+            peerId: remoteDeviceId,
+            peerName: remoteDeviceName,
+            direction: FileTransferDirection.receive,
+            status: FileTransferStatus.waiting,
+            files: files,
+            totalBytes: totalBytes,
+            transferredBytes: 0,
+            createdAt: DateTime.now(),
+          );
+          _upsertFileTransfer(record);
+          _activeFileTransferSockets[transferId] = socket;
+          accepted = await _confirmIncomingFileOffer(record);
+          if (!accepted) {
+            socket.writeln(
+              jsonEncode({
+                'protocol': _fileTransferProtocol,
+                'action': 'fileRejected',
+                'transferId': transferId,
+              }),
+            );
+            await socket.flush();
+            _updateFileTransfer(
+              transferId,
+              status: FileTransferStatus.rejected,
+            );
+            return;
+          }
+          final directory = await _receivedFilesDirectory();
+          _updateFileTransfer(
+            transferId,
+            status: FileTransferStatus.receiving,
+            saveDirectory: directory.path,
+          );
+          socket.writeln(
+            jsonEncode({
+              'protocol': _fileTransferProtocol,
+              'action': 'fileAccepted',
+              'transferId': transferId,
+            }),
+          );
+          await socket.flush();
+          continue;
+        }
+
+        final transferId = record?.id;
+        if (!accepted || transferId == null) {
+          throw const FormatException('Chưa xác nhận nhận file.');
+        }
+        if (_canceledFileTransferIds.contains(transferId)) {
+          throw const _FileTransferCanceledException();
+        }
+        if (action == 'fileStart') {
+          await sink?.close();
+          if (publicDownloadToken != null) {
+            await _cancelPublicDownloadFile(publicDownloadToken);
+            publicDownloadToken = null;
+            publicDownloadBuffer = null;
+            publicDownloadBufferedBytes = 0;
+          }
+          final fileName = message['name']?.toString() ?? 'file';
+          final relativePath = message['relativePath']?.toString();
+          final sizeValue = message['size'];
+          final fileSize = sizeValue is int
+              ? sizeValue
+              : int.tryParse('$sizeValue');
+          if (fileSize == null || fileSize < 0) {
+            throw const FormatException('Kích thước file không hợp lệ.');
+          }
+          if (Platform.isAndroid) {
+            final download = await _openPublicDownloadFile(
+              fileName,
+              relativePath: relativePath,
+            );
+            publicDownloadToken = download.$1;
+            publicDownloadBuffer = BytesBuilder(copy: false);
+            publicDownloadBufferedBytes = 0;
+            _updateFileTransfer(transferId, saveDirectory: download.$2);
+          } else {
+            final directory = await _receivedFilesDirectory();
+            finalFile = await _uniqueReceivedFile(
+              directory,
+              fileName,
+              relativePath: relativePath,
+            );
+            tempFile = File('${finalFile.path}.part');
+            await tempFile.parent.create(recursive: true);
+            sink = tempFile.openWrite();
+          }
+          await reader.readBytes(fileSize, (bytes) async {
+            if (_canceledFileTransferIds.contains(transferId)) {
+              throw const _FileTransferCanceledException();
+            }
+            if (publicDownloadToken != null) {
+              publicDownloadBuffer ??= BytesBuilder(copy: false);
+              publicDownloadBuffer!.add(bytes);
+              publicDownloadBufferedBytes += bytes.length;
+              if (publicDownloadBufferedBytes >= _androidFileWriteBatchBytes) {
+                await flushPublicDownloadBuffer();
+              }
+            } else {
+              final activeSink = sink;
+              if (activeSink == null) {
+                throw const FormatException('File đến trước metadata.');
+              }
+              activeSink.add(bytes);
+            }
+            transferred += bytes.length;
+            await updateReceiveProgress(transferId);
+          });
+          await updateReceiveProgress(transferId, force: true);
+          continue;
+        }
+        if (action == 'fileEnd') {
+          final indexValue = message['index'];
+          final fileIndex = indexValue is int
+              ? indexValue
+              : int.tryParse('$indexValue') ?? -1;
+          if (publicDownloadToken != null) {
+            await flushPublicDownloadBuffer();
+            await _finishPublicDownloadFile(publicDownloadToken);
+            publicDownloadToken = null;
+            publicDownloadBuffer = null;
+            publicDownloadBufferedBytes = 0;
+            socket.writeln(
+              jsonEncode({
+                'protocol': _fileTransferProtocol,
+                'action': 'fileStored',
+                'transferId': transferId,
+              }),
+            );
+            await socket.flush();
+            continue;
+          }
+          final activeSink = sink;
+          final activeTemp = tempFile;
+          final activeFinal = finalFile;
+          if (activeSink == null || activeTemp == null || activeFinal == null) {
+            throw const FormatException('File kết thúc không hợp lệ.');
+          }
+          await activeSink.flush();
+          await activeSink.close();
+          sink = null;
+          if (await activeFinal.exists()) {
+            await activeFinal.delete();
+          }
+          await activeTemp.rename(activeFinal.path);
+          _updateFileTransferSavedPath(
+            transferId,
+            index: fileIndex,
+            savedPath: activeFinal.path,
+          );
+          tempFile = null;
+          finalFile = null;
+          socket.writeln(
+            jsonEncode({
+              'protocol': _fileTransferProtocol,
+              'action': 'fileStored',
+              'transferId': transferId,
+            }),
+          );
+          await socket.flush();
+          continue;
+        }
+        if (action == 'transferComplete') {
+          await sink?.close();
+          sink = null;
+          _updateFileTransfer(
+            transferId,
+            status: FileTransferStatus.completed,
+            transferredBytes: record!.totalBytes,
+          );
+          final receivedMessage =
+              '${record.peerName}: ${record.files.length} file đã lưu vào Download/OpenCB.';
+          if (_appInForeground && mounted) {
+            _showCenterSnackBar(
+              'Đã nhận xong file.',
+              success: true,
+              maxWidth: 320,
+              duration: const Duration(seconds: 2),
+            );
+          } else {
+            await _showAndroidBackgroundNotification(
+              title: 'Đã nhận file',
+              body: receivedMessage,
+            );
+          }
+          socket.writeln(
+            jsonEncode({
+              'protocol': _fileTransferProtocol,
+              'action': 'transferStored',
+              'transferId': transferId,
+            }),
+          );
+          await socket.flush();
+          return;
+        }
+      }
+    } on _FileTransferCanceledException {
+      if (record != null) {
+        _updateFileTransfer(record.id, status: FileTransferStatus.canceled);
+      }
+    } catch (error) {
+      if (record != null) {
+        _updateFileTransfer(
+          record.id,
+          status: FileTransferStatus.failed,
+          error: _friendlySyncError(error),
+        );
+      }
+    } finally {
+      await sink?.close().catchError((_) {});
+      if (publicDownloadToken != null) {
+        await _cancelPublicDownloadFile(
+          publicDownloadToken,
+        ).catchError((_) => false);
+      }
+      if (tempFile != null && await tempFile.exists()) {
+        await tempFile.delete().catchError((_) => tempFile!);
+      }
+      if (record != null) {
+        _activeFileTransferSockets.remove(record.id);
+        _canceledFileTransferIds.remove(record.id);
+      }
+      await socket.close().catchError((_) {});
+    }
+  }
+
+  void _cancelFileTransfer(String id) {
+    _canceledFileTransferIds.add(id);
+    _activeFileTransferSockets.remove(id)?.destroy();
+    _updateFileTransfer(id, status: FileTransferStatus.canceled);
+  }
+
   Future<void> _captureClipboardText() async {
     if (_capturePaused || !_loaded) return;
     if (!_clipboardSettings.captureText) return;
-    final data = await Clipboard.getData(Clipboard.kTextPlain);
+    final ClipboardData? data;
+    try {
+      data = await Clipboard.getData(Clipboard.kTextPlain);
+    } catch (_) {
+      return;
+    }
     final text = data?.text;
     if (text == null) return;
     await _captureTextValue(text, source: 'Clipboard hệ thống');
+  }
+
+  Future<void> _sendClipboardFromNotification(String? nativeText) async {
+    if (!_loaded || !_clipboardSettings.captureText) {
+      await _showAndroidBackgroundNotification(
+        title: 'Chưa gửi clipboard',
+        body: 'OpenCB chưa sẵn sàng để gửi clipboard.',
+      );
+      return;
+    }
+    var text = nativeText;
+    if (text == null || text.isEmpty) {
+      try {
+        text = (await Clipboard.getData(Clipboard.kTextPlain))?.text;
+      } catch (_) {
+        text = null;
+      }
+    }
+    if (text == null || text.isEmpty) {
+      await _showAndroidBackgroundNotification(
+        title: 'Chưa gửi clipboard',
+        body: 'Không đọc được clipboard hiện tại.',
+      );
+      return;
+    }
+    if (_isSourceExcluded('Clipboard Android')) return;
+    if (_peers.isEmpty) {
+      await _showAndroidBackgroundNotification(
+        title: 'Chưa gửi clipboard',
+        body: 'Chưa có thiết bị đã ghép nối.',
+      );
+      return;
+    }
+
+    _lastClipboardText = text;
+    var stored = await _storage?.captureText(text, source: 'Clipboard Android');
+    await _storage?.applyRetention(maxItems: _clipboardSettings.retentionLimit);
+    await _loadEntries(captureCurrentClipboard: false);
+    stored ??= _entries.cast<ClipboardEntry?>().firstWhere(
+      (entry) => (entry?.body ?? entry?.preview) == text,
+      orElse: () => null,
+    );
+    if (mounted) setState(() => _selectedIndex = 0);
+    if (stored != null) {
+      await _pushEntryToOnlinePeers(stored, touchExisting: true);
+      await _showAndroidBackgroundNotification(
+        title: 'Đã gửi clipboard',
+        body: '',
+        silent: true,
+      );
+    }
   }
 
   Future<void> _captureTextValue(String text, {required String source}) async {
@@ -2927,57 +4881,163 @@ class _ClipboardHomePageState extends State<ClipboardHomePage> {
     }
   }
 
+  Future<void> _openReceivedFilesFolder() async {
+    final directory = await _receivedFilesDirectory();
+    if (!await directory.exists()) {
+      await directory.create(recursive: true);
+    }
+    await _openLocalPath(directory.path, fallbackCopy: false);
+  }
+
+  Future<void> _openFileTransferLocalFile(FileTransferRecord transfer) async {
+    final path = _localFileTransferPath(transfer);
+    if (path == null || path.trim().isEmpty) {
+      _showCenterSnackBar('Không tìm thấy file local để mở.');
+      return;
+    }
+    await _openLocalPath(path);
+  }
+
+  String? _localFileTransferPath(FileTransferRecord transfer) {
+    if (transfer.files.length != 1) return null;
+    final file = transfer.files.first;
+    final savedPath = file.savedPath?.trim();
+    if (savedPath != null && savedPath.isNotEmpty) return savedPath;
+    if (transfer.direction == FileTransferDirection.send) {
+      final path = file.path?.trim();
+      if (path != null && path.isNotEmpty) return path;
+    }
+    if (transfer.direction == FileTransferDirection.receive &&
+        transfer.saveDirectory != null) {
+      final candidate = File(
+        '${transfer.saveDirectory}${Platform.pathSeparator}${_safeRelativeFilePath(file.displayPath).replaceAll('/', Platform.pathSeparator)}',
+      );
+      if (candidate.existsSync()) return candidate.path;
+    }
+    return null;
+  }
+
+  Future<void> _openLocalPath(String path, {bool fallbackCopy = true}) async {
+    try {
+      if (Platform.isWindows) {
+        final type = FileSystemEntity.typeSync(path);
+        if (type == FileSystemEntityType.directory) {
+          await Process.run('explorer.exe', [path]);
+        } else {
+          await Process.run('rundll32.exe', [
+            'url.dll,FileProtocolHandler',
+            path,
+          ]);
+        }
+      } else if (Platform.isMacOS) {
+        await Process.run('open', [path]);
+      } else if (Platform.isLinux) {
+        await Process.run('xdg-open', [path]);
+      } else {
+        if (fallbackCopy) {
+          await Clipboard.setData(ClipboardData(text: path));
+          _showCenterSnackBar('Đã copy đường dẫn.');
+        } else {
+          _showCenterSnackBar('File đã lưu trong Download/OpenCB.');
+        }
+      }
+    } catch (_) {
+      if (fallbackCopy) {
+        await Clipboard.setData(ClipboardData(text: path));
+        _showCenterSnackBar('Không mở được, đã copy đường dẫn.');
+      } else {
+        _showCenterSnackBar('Không mở được folder nhận file.');
+      }
+    }
+  }
+
   EdgeInsets _bottomCenterSnackBarMargin() {
-    return const EdgeInsets.fromLTRB(16, 0, 16, 18);
+    final mobile = MediaQuery.sizeOf(context).width < _mobileLayoutBreakpoint;
+    return EdgeInsets.fromLTRB(16, 0, 16, mobile ? 104 : 18);
+  }
+
+  void _removeNoticeOverlay() {
+    _noticeOverlayTimer?.cancel();
+    _noticeOverlayTimer = null;
+    _noticeOverlayEntry?.remove();
+    _noticeOverlayEntry = null;
   }
 
   void _showCenterSnackBar(
     String message, {
     Duration duration = const Duration(milliseconds: 1600),
     double maxWidth = 300,
+    bool success = false,
   }) {
     if (!mounted) return;
     final colorScheme = Theme.of(context).colorScheme;
-    final messenger = ScaffoldMessenger.of(context);
-    messenger.hideCurrentSnackBar();
-    messenger.showSnackBar(
-      SnackBar(
-        behavior: SnackBarBehavior.floating,
-        backgroundColor: Colors.transparent,
-        elevation: 0,
-        duration: duration,
-        margin: _bottomCenterSnackBarMargin(),
-        padding: EdgeInsets.zero,
-        content: Center(
-          heightFactor: 1,
-          child: ConstrainedBox(
-            constraints: BoxConstraints(maxWidth: maxWidth),
-            child: DecoratedBox(
-              decoration: BoxDecoration(
-                color: colorScheme.inverseSurface,
-                borderRadius: BorderRadius.circular(10),
-                boxShadow: [
-                  BoxShadow(
-                    color: colorScheme.shadow.withValues(alpha: 0.16),
-                    blurRadius: 14,
-                    offset: const Offset(0, 4),
+    final backgroundColor = success
+        ? colorScheme.surfaceContainerHighest
+        : colorScheme.inverseSurface;
+    final foregroundColor = success
+        ? colorScheme.onSurface
+        : colorScheme.onInverseSurface;
+    final margin = _bottomCenterSnackBarMargin();
+    final textStyle = Theme.of(context).textTheme.bodyMedium?.copyWith(
+      color: foregroundColor,
+      fontWeight: FontWeight.w700,
+      height: 1.12,
+    );
+    _removeNoticeOverlay();
+    final overlay = Overlay.of(context, rootOverlay: true);
+    _noticeOverlayEntry = OverlayEntry(
+      builder: (context) => Positioned(
+        left: margin.left,
+        right: margin.right,
+        bottom: margin.bottom + MediaQuery.paddingOf(context).bottom,
+        child: IgnorePointer(
+          child: Center(
+            child: ConstrainedBox(
+              constraints: BoxConstraints(maxWidth: maxWidth),
+              child: Material(
+                color: Colors.transparent,
+                child: DecoratedBox(
+                  decoration: BoxDecoration(
+                    color: backgroundColor,
+                    borderRadius: BorderRadius.circular(10),
+                    border: success
+                        ? Border.all(color: colorScheme.outlineVariant)
+                        : null,
+                    boxShadow: [
+                      BoxShadow(
+                        color: colorScheme.shadow.withValues(alpha: 0.16),
+                        blurRadius: 14,
+                        offset: const Offset(0, 4),
+                      ),
+                    ],
                   ),
-                ],
-              ),
-              child: Padding(
-                padding: const EdgeInsets.symmetric(
-                  horizontal: 14,
-                  vertical: 9,
-                ),
-                child: Text(
-                  message,
-                  maxLines: 2,
-                  overflow: TextOverflow.ellipsis,
-                  textAlign: TextAlign.center,
-                  style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-                    color: colorScheme.onInverseSurface,
-                    fontWeight: FontWeight.w700,
-                    height: 1.12,
+                  child: Padding(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 14,
+                      vertical: 9,
+                    ),
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        if (success) ...[
+                          Icon(
+                            Icons.check_circle_outline,
+                            size: 18,
+                            color: foregroundColor,
+                          ),
+                          const SizedBox(width: 8),
+                        ],
+                        Flexible(
+                          child: Text(
+                            message,
+                            maxLines: 2,
+                            overflow: TextOverflow.ellipsis,
+                            textAlign: TextAlign.center,
+                            style: textStyle,
+                          ),
+                        ),
+                      ],
+                    ),
                   ),
                 ),
               ),
@@ -2985,6 +5045,63 @@ class _ClipboardHomePageState extends State<ClipboardHomePage> {
           ),
         ),
       ),
+    );
+    overlay.insert(_noticeOverlayEntry!);
+    _noticeOverlayTimer = Timer(duration, _removeNoticeOverlay);
+  }
+
+  EdgeInsets _deleteUndoNoticeMargin() {
+    final mobile = MediaQuery.sizeOf(context).width < _mobileLayoutBreakpoint;
+    return EdgeInsets.fromLTRB(16, 0, 16, mobile ? 116 : 78);
+  }
+
+  Rect? _desktopDetailActionBarRect() {
+    final currentContext = _desktopDetailActionBarKey.currentContext;
+    if (currentContext == null) return null;
+    final renderObject = currentContext.findRenderObject();
+    if (renderObject is! RenderBox || !renderObject.hasSize) return null;
+    final topLeft = renderObject.localToGlobal(Offset.zero);
+    return topLeft & renderObject.size;
+  }
+
+  void _showDeleteUndoNotice(List<ClipboardEntry> entries) {
+    if (!mounted || entries.isEmpty) return;
+    final message = entries.length == 1
+        ? 'Đã xóa clipboard.'
+        : 'Đã xóa ${entries.length} clipboard.';
+    final margin = _deleteUndoNoticeMargin();
+    final actionBarRect = _desktopDetailActionBarRect();
+    final overlay = Overlay.of(context, rootOverlay: true);
+    _removeNoticeOverlay();
+    _noticeOverlayEntry = OverlayEntry(
+      builder: (context) {
+        final mediaPadding = MediaQuery.paddingOf(context);
+        final positioned = actionBarRect == null
+            ? Positioned(
+                left: margin.left,
+                right: margin.right,
+                bottom: margin.bottom + mediaPadding.bottom,
+                child: _DeleteUndoNoticeContent(
+                  message: message,
+                  onUndo: () => _undoDeletedEntries(entries),
+                ),
+              )
+            : Positioned(
+                left: actionBarRect.left + 20,
+                width: math.min(420, math.max(260, actionBarRect.width - 40)),
+                top: math.max(mediaPadding.top + 8, actionBarRect.top - 46),
+                child: _DeleteUndoNoticeContent(
+                  message: message,
+                  onUndo: () => _undoDeletedEntries(entries),
+                ),
+              );
+        return positioned;
+      },
+    );
+    overlay.insert(_noticeOverlayEntry!);
+    _noticeOverlayTimer = Timer(
+      const Duration(seconds: 3),
+      _removeNoticeOverlay,
     );
   }
 
@@ -3041,6 +5158,37 @@ class _ClipboardHomePageState extends State<ClipboardHomePage> {
         unawaited(_finalizeDeletedEntries([entry]));
       });
     }
+    _showDeleteUndoNotice(entries);
+  }
+
+  void _undoDeletedEntries(List<ClipboardEntry> entries) {
+    if (entries.isEmpty) return;
+    var restoredAny = false;
+    for (final entry in entries) {
+      final timer = _pendingDeleteTimers.remove(entry.id);
+      if (timer == null) continue;
+      timer.cancel();
+      _pendingDeleteIds.remove(entry.id);
+      restoredAny = true;
+    }
+    if (!restoredAny || !mounted) {
+      _removeNoticeOverlay();
+      return;
+    }
+    setState(() {
+      final existingIds = _entries.map((entry) => entry.id).toSet();
+      _entries = [
+        ..._entries,
+        for (final entry in entries)
+          if (!existingIds.contains(entry.id)) entry,
+      ];
+      _sortEntries();
+      final restoredIndex = _visibleEntries.indexWhere(
+        (item) => item.id == entries.first.id,
+      );
+      if (restoredIndex >= 0) _selectedIndex = restoredIndex;
+    });
+    _removeNoticeOverlay();
   }
 
   Future<void> _finalizeDeletedEntries(List<ClipboardEntry> entries) async {
@@ -3431,9 +5579,11 @@ class _ClipboardHomePageState extends State<ClipboardHomePage> {
     });
     if (enabled) {
       await _startSyncServer();
+      await _startFileTransferServer();
       await _startLanDiscovery();
     } else {
       await _stopSyncServer();
+      await _stopFileTransferServer();
       _stopLanDiscovery();
     }
   }
@@ -3481,6 +5631,7 @@ class _ClipboardHomePageState extends State<ClipboardHomePage> {
     } else {
       updatePeer();
     }
+    _rememberReachablePeer(peer.copyWith(clearError: true));
     await _savePeers();
   }
 
@@ -3593,6 +5744,10 @@ class _ClipboardHomePageState extends State<ClipboardHomePage> {
     final host = response['host']?.toString().trim();
     final portValue = response['port'];
     final port = portValue is int ? portValue : int.tryParse('$portValue');
+    final filePortValue = response['filePort'];
+    final filePort = filePortValue is int
+        ? filePortValue
+        : int.tryParse('$filePortValue');
     final pairCode = response['pairCode']?.toString().trim().toUpperCase();
     if (id == null ||
         id.isEmpty ||
@@ -3610,6 +5765,9 @@ class _ClipboardHomePageState extends State<ClipboardHomePage> {
       name: name == null || name.isEmpty ? fallback.name : name,
       host: host,
       port: port,
+      filePort: filePort == null || filePort <= 0 || filePort > 65535
+          ? fallback.filePort
+          : filePort,
       pairCode: pairCode,
     );
   }
@@ -3753,20 +5911,15 @@ class _ClipboardHomePageState extends State<ClipboardHomePage> {
     });
   }
 
-  void _toggleTagFilter(String tag) {
+  void _setHistoryScopeFilter(_HistoryScopeFilter filter) {
     setState(() {
-      if (!_tagFilters.add(tag)) {
-        _tagFilters.remove(tag);
-      }
+      _historyScopeFilter = filter;
       _selectedIndex = 0;
     });
   }
 
-  void _clearTagFilters() {
-    setState(() {
-      _tagFilters = {};
-      _selectedIndex = 0;
-    });
+  int _historyScopeIndex(_HistoryScopeFilter filter) {
+    return _HistoryScopeFilter.values.indexOf(filter).clamp(0, 2);
   }
 
   void _toggleBulkSelectMode() {
@@ -3888,14 +6041,34 @@ class _ClipboardHomePageState extends State<ClipboardHomePage> {
       });
       return;
     }
-    final currentPage = _mobilePageController.page?.round();
-    if (currentPage == index) return;
+    final rawPage = _mobilePageController.page;
+    final currentPage = rawPage?.round();
+    if (currentPage == index && ((rawPage ?? index) - index).abs() < 0.001) {
+      _mobilePageAnimationTargetIndex = null;
+      return;
+    }
+    final fromPage = rawPage ?? currentPage?.toDouble() ?? 0;
+    final pageDistance = (index - fromPage).abs().clamp(1.0, 3.0);
+    final duration = Duration(
+      milliseconds:
+          (index == 1 && fromPage > 0 && fromPage < 1
+                  ? 260 + (1 - fromPage) * 180
+                  : 320 + pageDistance * 140)
+              .round(),
+    );
+    _mobilePageAnimationTargetIndex = index;
     unawaited(
-      _mobilePageController.animateToPage(
-        index,
-        duration: const Duration(milliseconds: 320),
-        curve: Curves.easeOutCubic,
-      ),
+      _mobilePageController
+          .animateToPage(
+            index,
+            duration: duration,
+            curve: Curves.easeInOutCubic,
+          )
+          .whenComplete(() {
+            if (_mobilePageAnimationTargetIndex == index) {
+              _mobilePageAnimationTargetIndex = null;
+            }
+          }),
     );
   }
 
@@ -3915,10 +6088,39 @@ class _ClipboardHomePageState extends State<ClipboardHomePage> {
     }
   }
 
+  void _selectMobileToolbarSection(String section) {
+    final index = _mobileSectionIndex(section);
+    if (index < 0) {
+      _selectSection(section);
+      return;
+    }
+    final currentPage =
+        _mobilePageController.hasClients &&
+            _mobilePageController.positions.length == 1
+        ? _mobilePageController.page?.round()
+        : null;
+    if (currentPage == index) {
+      _selectSection(section, syncMobilePage: false);
+      return;
+    }
+    setState(() {
+      _mobilePageAnimationTargetIndex = index;
+      if (section == 'Lịch sử') {
+        _historyScopeFilter = _HistoryScopeFilter.all;
+      }
+      _selectedIndex = 0;
+      if (!_isClipboardSectionFor(section)) {
+        _mobileSearchOpen = false;
+      }
+    });
+    _syncMobilePageToSection(section);
+  }
+
   void _toggleMobileSearch() {
     setState(() {
       if (!_isClipboardSection) {
         _section = 'Lịch sử';
+        _historyScopeFilter = _HistoryScopeFilter.all;
         _selectedIndex = 0;
         _mobileSearchOpen = true;
         _syncMobilePageToSection('Lịch sử');
@@ -4049,9 +6251,16 @@ class _ClipboardHomePageState extends State<ClipboardHomePage> {
     required bool mobile,
     bool compact = false,
     String? section,
+    _HistoryScopeFilter? historyScope,
   }) {
-    final hasHistoryFilters = _kindFilter != null || _tagFilters.isNotEmpty;
     final activeSection = section ?? _section;
+    final activeHistoryScope = historyScope ?? _historyScopeFilter;
+    final showHistoryScopeFilter = activeSection == 'Lịch sử';
+    final hasHistoryFilters =
+        _kindFilter != null ||
+        (showHistoryScopeFilter &&
+            activeHistoryScope != _HistoryScopeFilter.all) ||
+        (!showHistoryScopeFilter && _tagFilters.isNotEmpty);
     return _HistoryList(
       title: _historyListTitle(activeSection),
       emptyMessage: _historyEmptyMessage(
@@ -4062,9 +6271,10 @@ class _ClipboardHomePageState extends State<ClipboardHomePage> {
       tagDefinitions: _tagDefinitions,
       promotedEntryId: _promotedEntryId,
       promotionToken: _promotionToken,
-      availableTags: _availableTags,
       selectedKind: _kindFilter,
-      selectedTags: _tagFilters,
+      selectedScope: activeHistoryScope,
+      selectedScopePosition: _historyScopeIndex(activeHistoryScope).toDouble(),
+      showScopeFilter: showHistoryScopeFilter,
       bulkSelectMode: _bulkSelectMode,
       bulkSelectedIds: _bulkSelectedIds,
       selectedIndex: _selectedIndex,
@@ -4072,8 +6282,7 @@ class _ClipboardHomePageState extends State<ClipboardHomePage> {
       compact: mobile || compact,
       bottomContentPadding: mobile ? 96 : 12,
       onKindSelected: _setKindFilter,
-      onTagToggled: _toggleTagFilter,
-      onClearTagFilters: _clearTagFilters,
+      onScopeSelected: _setHistoryScopeFilter,
       onCopy: (entry) => unawaited(_copyEntryToClipboard(entry)),
       onTogglePin: (entry) => unawaited(_togglePin(entry)),
       onEditTags: (entry) => unawaited(_editTags(entry)),
@@ -4134,6 +6343,34 @@ class _ClipboardHomePageState extends State<ClipboardHomePage> {
       );
     }
 
+    if (activeSection == 'Gửi file') {
+      return _FileTransferPage(
+        peers: _onlineFileTransferPeers,
+        transfers: _fileTransfers,
+        selectedFiles: _selectedTransferFiles,
+        selectedPeerIds: _fileTransferTargetIds,
+        statusFilter: _fileTransferStatusFilter,
+        draggingFiles: _draggingTransferFiles,
+        lanSyncEnabled: _lanSyncEnabled,
+        onPickFiles: () => unawaited(_pickTransferFiles()),
+        onPickFolder: () => unawaited(_pickTransferFolder()),
+        onDropPaths: (paths) => unawaited(_addTransferPaths(paths)),
+        onDragChanged: (dragging) =>
+            setState(() => _draggingTransferFiles = dragging),
+        onRemoveSelectedFile: _removeSelectedTransferFile,
+        onClearSelectedFiles: _clearSelectedTransferFiles,
+        onTogglePeer: _toggleFileTransferTarget,
+        onToggleAllPeers: _toggleAllFileTransferTargets,
+        onSendSelected: () => unawaited(_sendSelectedFilesToTargets()),
+        onStatusFilterChanged: (status) =>
+            setState(() => _fileTransferStatusFilter = status),
+        onClearTransferHistory: () =>
+            unawaited(_clearFinishedFileTransferHistory()),
+        onOpenTransferFile: _openFileTransferLocalFile,
+        onCancelTransfer: _cancelFileTransfer,
+      );
+    }
+
     if (activeSection == 'Cài đặt') {
       return _SettingsPage(
         capturePaused: _capturePaused,
@@ -4142,6 +6379,8 @@ class _ClipboardHomePageState extends State<ClipboardHomePage> {
         sourceSuggestions: _knownSourceSuggestions(),
         themeMode: widget.themeMode,
         themePreset: widget.themePreset,
+        androidIgnoringBatteryOptimizations:
+            _androidIgnoringBatteryOptimizations,
         onToggleCapture: () {
           setState(() => _capturePaused = !_capturePaused);
           if (!_capturePaused) _captureClipboardText();
@@ -4157,9 +6396,10 @@ class _ClipboardHomePageState extends State<ClipboardHomePage> {
         onRestoreBackup: () => unawaited(_restoreDataBackup()),
         onResetClipboardHistory: () =>
             unawaited(_confirmResetClipboardHistory()),
-        onOpenDevices: Platform.isAndroid
-            ? () => _selectSection('Thiết bị')
-            : null,
+        onOpenAndroidNotificationSettings: _openAndroidNotificationSettings,
+        onToggleAndroidBatteryOptimizationBypass: (enabled) =>
+            unawaited(_toggleAndroidBatteryOptimizationBypass(enabled)),
+        onOpenDevices: null,
       );
     }
 
@@ -4198,6 +6438,7 @@ class _ClipboardHomePageState extends State<ClipboardHomePage> {
                     child: _DetailPanel(
                       entry: selectedEntry,
                       compact: compactDesktop,
+                      actionBarKey: _desktopDetailActionBarKey,
                       onRestore: selectedEntry == null
                           ? null
                           : () => _copyEntryToClipboard(selectedEntry),
@@ -4246,12 +6487,19 @@ class _ClipboardHomePageState extends State<ClipboardHomePage> {
   }
 
   bool _isClipboardSectionFor(String section) =>
-      section != 'Thiết bị' && section != 'Cài đặt';
+      section != 'Thiết bị' && section != 'Gửi file' && section != 'Cài đặt';
 
   bool get _isClipboardSection => _isClipboardSectionFor(_section);
 
   Widget _buildMobileSectionContent({String? section}) {
     final activeSection = section ?? _section;
+    if (activeSection == 'Lịch sử') {
+      return _buildHistoryList(
+        visibleEntries: _visibleEntriesForSection('Lịch sử'),
+        mobile: true,
+        section: 'Lịch sử',
+      );
+    }
     if (_isClipboardSectionFor(activeSection)) {
       return _buildHistoryList(
         visibleEntries: _visibleEntriesForSection(activeSection),
@@ -4266,9 +6514,9 @@ class _ClipboardHomePageState extends State<ClipboardHomePage> {
     final colorScheme = Theme.of(context).colorScheme;
     final activeSection = section ?? _section;
     final isClipboardSection = _isClipboardSectionFor(activeSection);
-    final isDevicesSubPage = activeSection == 'Thiết bị';
     final title = switch (activeSection) {
       'Thiết bị' => 'Thiết bị LAN',
+      'Gửi file' => 'Gửi file',
       'Cài đặt' => 'Cài đặt',
       _ => 'OpenCB',
     };
@@ -4283,14 +6531,6 @@ class _ClipboardHomePageState extends State<ClipboardHomePage> {
           padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
           child: Row(
             children: [
-              if (isDevicesSubPage) ...[
-                IconButton(
-                  tooltip: 'Quay về Cài đặt',
-                  onPressed: () => _selectSection('Cài đặt'),
-                  icon: const Icon(Icons.arrow_back),
-                ),
-                const SizedBox(width: 4),
-              ],
               Text(
                 title,
                 style: Theme.of(
@@ -4324,40 +6564,52 @@ class _ClipboardHomePageState extends State<ClipboardHomePage> {
         label: 'Lịch sử',
       ),
       (
-        icon: Icons.bookmark_border,
-        selectedIcon: Icons.bookmark,
-        label: 'Đã ghim',
+        icon: Icons.compare_arrows_rounded,
+        selectedIcon: Icons.compare_arrows_rounded,
+        label: 'Gửi file',
       ),
-      (icon: Icons.sell_outlined, selectedIcon: Icons.sell, label: 'Thẻ'),
+      (
+        icon: Icons.devices_other_outlined,
+        selectedIcon: Icons.devices_other,
+        label: 'Thiết bị',
+      ),
       (
         icon: Icons.settings_outlined,
         selectedIcon: Icons.settings,
         label: 'Cài đặt',
       ),
     ];
-    final mobileSection = _section == 'Thiết bị' ? 'Cài đặt' : _section;
+    final targetIndex = _mobilePageAnimationTargetIndex;
+    final mobileSection =
+        targetIndex != null &&
+            targetIndex >= 0 &&
+            targetIndex < _mobileMainSections.length
+        ? _mobileMainSections[targetIndex]
+        : _mobileMainSections.contains(_section)
+        ? _section
+        : 'Lịch sử';
     final selectedIndex = sections.indexWhere(
       (section) => section.label == mobileSection,
     );
     Widget buildMobileMainPage(String section) {
+      final page = Column(
+        children: [
+          _buildMobileTopBar(section: section),
+          Expanded(child: _buildMobileSectionContent(section: section)),
+        ],
+      );
       return KeyedSubtree(
         key: PageStorageKey<String>('mobile-$section'),
-        child: Column(
-          children: [
-            _buildMobileTopBar(section: section),
-            Expanded(child: _buildMobileSectionContent(section: section)),
-          ],
-        ),
+        child: RepaintBoundary(child: page),
       );
     }
 
-    final showFloatingToolbar = _section != 'Thiết bị';
+    final showFloatingToolbar = true;
     final showMobileSearchButton = showFloatingToolbar;
     return PopScope(
-      canPop: _section != 'Thiết bị',
+      canPop: true,
       onPopInvokedWithResult: (didPop, result) {
-        if (didPop || _section != 'Thiết bị') return;
-        _selectSection('Cài đặt');
+        return;
       },
       child: Scaffold(
         backgroundColor: Theme.of(context).colorScheme.surfaceContainerLowest,
@@ -4374,31 +6626,31 @@ class _ClipboardHomePageState extends State<ClipboardHomePage> {
                   PageView(
                     controller: _mobilePageController,
                     onPageChanged: (index) {
-                      if (index < 0 || index >= sections.length) return;
-                      _selectSection(
-                        sections[index].label,
-                        syncMobilePage: false,
-                      );
+                      if (index < 0 || index >= _mobileMainSections.length) {
+                        return;
+                      }
+                      final targetIndex = _mobilePageAnimationTargetIndex;
+                      if (targetIndex != null && index != targetIndex) return;
+                      final pageSection = _mobileMainSections[index];
+                      setState(() {
+                        _section = pageSection;
+                        _selectedIndex = 0;
+                        if (!_isClipboardSectionFor(pageSection)) {
+                          _mobileSearchOpen = false;
+                        }
+                      });
+                      if (pageSection == 'Thiết bị') {
+                        unawaited(_refreshSyncHost());
+                      }
+                      if (targetIndex == index) {
+                        _mobilePageAnimationTargetIndex = null;
+                      }
                     },
                     children: [
                       for (final section in _mobileMainSections)
                         buildMobileMainPage(section),
                     ],
                   ),
-                  if (_section == 'Thiết bị')
-                    Positioned.fill(
-                      child: Material(
-                        color: Theme.of(
-                          context,
-                        ).colorScheme.surfaceContainerLowest,
-                        child: Column(
-                          children: [
-                            _buildMobileTopBar(),
-                            Expanded(child: _buildMobileSectionContent()),
-                          ],
-                        ),
-                      ),
-                    ),
                   if (showFloatingToolbar)
                     Align(
                       alignment: Alignment.bottomCenter,
@@ -4408,13 +6660,31 @@ class _ClipboardHomePageState extends State<ClipboardHomePage> {
                         child: Row(
                           children: [
                             Expanded(
-                              child: _MobileFloatingToolbar(
-                                items: sections,
-                                selectedIndex: selectedIndex < 0
-                                    ? 0
-                                    : selectedIndex,
-                                onSelected: (index) =>
-                                    _selectSection(sections[index].label),
+                              child: AnimatedBuilder(
+                                animation: _mobilePageController,
+                                builder: (context, _) {
+                                  var selectedPosition =
+                                      (selectedIndex < 0 ? 0 : selectedIndex)
+                                          .toDouble();
+                                  if (_mobilePageController.hasClients &&
+                                      _mobilePageController.positions.length ==
+                                          1) {
+                                    selectedPosition =
+                                        _mobilePageController.page ??
+                                        selectedPosition;
+                                  }
+                                  return _MobileFloatingToolbar(
+                                    items: sections,
+                                    selectedIndex: selectedIndex < 0
+                                        ? 0
+                                        : selectedIndex,
+                                    selectedPosition: selectedPosition,
+                                    onSelected: (index) =>
+                                        _selectMobileToolbarSection(
+                                          sections[index].label,
+                                        ),
+                                  );
+                                },
                               ),
                             ),
                             if (showMobileSearchButton)
@@ -4450,6 +6720,7 @@ class _ClipboardHomePageState extends State<ClipboardHomePage> {
       searchFocusNode: _searchFocusNode,
       onSearchChanged: (_) => setState(() => _selectedIndex = 0),
       onClearUnpinned: _confirmAndClearUnpinned,
+      onOpenReceivedFolder: _openReceivedFilesFolder,
     );
   }
 
@@ -4570,6 +6841,11 @@ class _Sidebar extends StatelessWidget {
         label: 'Đã ghim',
       ),
       (icon: Icons.sell_outlined, selectedIcon: Icons.sell, label: 'Thẻ'),
+      (
+        icon: Icons.compare_arrows_rounded,
+        selectedIcon: Icons.compare_arrows_rounded,
+        label: 'Gửi file',
+      ),
       (
         icon: Icons.devices_other_outlined,
         selectedIcon: Icons.devices_other,
@@ -4854,117 +7130,222 @@ class _MobileFloatingToolbar extends StatelessWidget {
   const _MobileFloatingToolbar({
     required this.items,
     required this.selectedIndex,
+    required this.selectedPosition,
     required this.onSelected,
   });
 
   final List<({IconData icon, IconData selectedIcon, String label})> items;
   final int selectedIndex;
+  final double selectedPosition;
   final ValueChanged<int> onSelected;
 
   @override
   Widget build(BuildContext context) {
     final colorScheme = Theme.of(context).colorScheme;
+    final textScale = MediaQuery.textScalerOf(context).scale(1);
     return LayoutBuilder(
       builder: (context, constraints) {
         final availableWidth = math.max(0.0, constraints.maxWidth - 24);
-        final showLabels = availableWidth >= 300;
+        final estimatedItemWidth = items.isEmpty
+            ? availableWidth
+            : availableWidth / items.length;
+        final minItemWidthForLabels = textScale <= 1.18
+            ? 66.0
+            : textScale <= 1.35
+            ? 74.0
+            : 86.0;
+        final showLabels =
+            estimatedItemWidth >= minItemWidthForLabels && textScale <= 1.18;
+        final isDark = colorScheme.brightness == Brightness.dark;
+        final glassFill = colorScheme.surfaceContainerHigh.withValues(
+          alpha: isDark ? 0.70 : 0.66,
+        );
+        final glassBorder = Color.alphaBlend(
+          colorScheme.primary.withValues(alpha: isDark ? 0.18 : 0.10),
+          colorScheme.outlineVariant.withValues(alpha: 0.34),
+        );
         final activePillColor = Color.alphaBlend(
-          colorScheme.primary.withValues(alpha: 0.70),
-          colorScheme.surfaceContainerHigh,
+          colorScheme.primary.withValues(alpha: isDark ? 0.38 : 0.30),
+          colorScheme.surfaceContainerHighest.withValues(alpha: 0.74),
         );
 
         return Padding(
           padding: const EdgeInsets.fromLTRB(12, 0, 12, 10),
-          child: Material(
-            color: colorScheme.surfaceContainerHigh,
-            elevation: 3,
-            shadowColor: colorScheme.shadow.withValues(alpha: 0.16),
-            surfaceTintColor: colorScheme.primary,
-            shape: const StadiumBorder(),
-            clipBehavior: Clip.antiAlias,
-            child: Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 5),
-              child: LayoutBuilder(
-                builder: (context, innerConstraints) {
-                  const gap = 4.0;
-                  final itemCount = items.length;
-                  final totalGap = gap * math.max(0, itemCount - 1);
-                  final itemWidth = itemCount == 0
-                      ? 0.0
-                      : math.max(
-                          48.0,
-                          (innerConstraints.maxWidth - totalGap) / itemCount,
-                        );
-                  final clampedSelectedIndex = itemCount == 0
-                      ? 0
-                      : selectedIndex.clamp(0, itemCount - 1).toInt();
-                  final indicatorLeft =
-                      clampedSelectedIndex * (itemWidth + gap);
-
-                  return SizedBox(
-                    height: 52,
-                    child: Stack(
-                      children: [
-                        AnimatedPositioned(
-                          duration: const Duration(milliseconds: 420),
-                          curve: Curves.easeOutCubic,
-                          left: indicatorLeft,
-                          top: 0,
-                          width: itemWidth,
-                          height: 52,
-                          child: IgnorePointer(
-                            child: TweenAnimationBuilder<double>(
-                              key: ValueKey(
-                                'toolbar-pill-squash-$clampedSelectedIndex',
-                              ),
-                              tween: Tween(begin: 0, end: 1),
-                              duration: const Duration(milliseconds: 420),
-                              curve: Curves.easeOutCubic,
-                              builder: (context, value, child) {
-                                final squash = math.sin(value * math.pi);
-                                return Transform.scale(
-                                  scaleX: 1 + squash * 0.025,
-                                  scaleY: 1 - squash * 0.13,
-                                  child: child,
-                                );
-                              },
-                              child: DecoratedBox(
-                                decoration: ShapeDecoration(
-                                  color: activePillColor,
-                                  shape: const StadiumBorder(),
-                                ),
+          child: ClipRRect(
+            borderRadius: BorderRadius.circular(999),
+            child: BackdropFilter(
+              filter: ui.ImageFilter.blur(sigmaX: 12, sigmaY: 12),
+              child: DecoratedBox(
+                decoration: ShapeDecoration(
+                  color: glassFill,
+                  shape: StadiumBorder(
+                    side: BorderSide(color: glassBorder, width: 1.1),
+                  ),
+                  shadows: [
+                    BoxShadow(
+                      color: colorScheme.shadow.withValues(alpha: 0.14),
+                      blurRadius: 18,
+                      offset: const Offset(0, 8),
+                    ),
+                    BoxShadow(
+                      color: colorScheme.primary.withValues(alpha: 0.08),
+                      blurRadius: 28,
+                      offset: const Offset(0, 2),
+                    ),
+                  ],
+                ),
+                child: Material(
+                  color: Colors.transparent,
+                  shape: const StadiumBorder(),
+                  clipBehavior: Clip.antiAlias,
+                  child: Stack(
+                    children: [
+                      Positioned.fill(
+                        child: IgnorePointer(
+                          child: DecoratedBox(
+                            decoration: BoxDecoration(
+                              gradient: LinearGradient(
+                                begin: Alignment.topCenter,
+                                end: Alignment.bottomCenter,
+                                colors: [
+                                  colorScheme.surfaceBright.withValues(
+                                    alpha: isDark ? 0.08 : 0.34,
+                                  ),
+                                  colorScheme.surfaceContainerHighest
+                                      .withValues(alpha: isDark ? 0.05 : 0.10),
+                                  colorScheme.surfaceDim.withValues(
+                                    alpha: isDark ? 0.08 : 0.04,
+                                  ),
+                                ],
                               ),
                             ),
                           ),
                         ),
-                        Row(
-                          mainAxisSize: MainAxisSize.max,
-                          mainAxisAlignment: MainAxisAlignment.center,
-                          children: [
-                            for (
-                              var index = 0;
-                              index < items.length;
-                              index++
-                            ) ...[
-                              Expanded(
-                                child: _MobileFloatingToolbarItem(
-                                  icon: items[index].icon,
-                                  selectedIcon: items[index].selectedIcon,
-                                  label: items[index].label,
-                                  selected: index == selectedIndex,
-                                  showLabel: showLabels,
-                                  onPressed: () => onSelected(index),
-                                ),
-                              ),
-                              if (index != items.length - 1)
-                                const SizedBox(width: gap),
-                            ],
-                          ],
+                      ),
+                      Padding(
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 8,
+                          vertical: 5,
                         ),
-                      ],
-                    ),
-                  );
-                },
+                        child: LayoutBuilder(
+                          builder: (context, innerConstraints) {
+                            const gap = 4.0;
+                            final itemCount = items.length;
+                            final totalGap = gap * math.max(0, itemCount - 1);
+                            final itemWidth = itemCount == 0
+                                ? 0.0
+                                : math.max(
+                                    48.0,
+                                    (innerConstraints.maxWidth - totalGap) /
+                                        itemCount,
+                                  );
+                            final clampedSelectedIndex = itemCount == 0
+                                ? 0
+                                : selectedIndex.clamp(0, itemCount - 1).toInt();
+                            final clampedSelectedPosition = itemCount == 0
+                                ? 0.0
+                                : selectedPosition.clamp(
+                                    0.0,
+                                    (itemCount - 1).toDouble(),
+                                  );
+                            final indicatorLeft =
+                                clampedSelectedPosition * (itemWidth + gap);
+                            final isDraggingPage =
+                                (clampedSelectedPosition -
+                                        clampedSelectedPosition.round())
+                                    .abs() >
+                                0.001;
+                            final indicatorDistance =
+                                (clampedSelectedIndex - clampedSelectedPosition)
+                                    .abs()
+                                    .clamp(1.0, 3.0);
+                            final indicatorDuration = Duration(
+                              milliseconds: (320 + indicatorDistance * 140)
+                                  .round(),
+                            );
+                            final toolbarHeight = showLabels ? 52.0 : 44.0;
+
+                            return SizedBox(
+                              height: toolbarHeight,
+                              child: Stack(
+                                children: [
+                                  AnimatedPositioned(
+                                    duration: isDraggingPage
+                                        ? Duration.zero
+                                        : indicatorDuration,
+                                    curve: Curves.easeInOutCubic,
+                                    left: indicatorLeft,
+                                    top: 0,
+                                    width: itemWidth,
+                                    height: toolbarHeight,
+                                    child: IgnorePointer(
+                                      child: TweenAnimationBuilder<double>(
+                                        key: ValueKey(
+                                          'toolbar-pill-squash-$clampedSelectedIndex',
+                                        ),
+                                        tween: Tween(begin: 0, end: 1),
+                                        duration: const Duration(
+                                          milliseconds: 480,
+                                        ),
+                                        curve: Curves.easeOutCubic,
+                                        builder: (context, value, child) {
+                                          final squash = math.sin(
+                                            value * math.pi,
+                                          );
+                                          return Transform.scale(
+                                            scaleX: 1 + squash * 0.025,
+                                            scaleY: 1 - squash * 0.08,
+                                            child: child,
+                                          );
+                                        },
+                                        child: DecoratedBox(
+                                          decoration: ShapeDecoration(
+                                            color: activePillColor,
+                                            shape: StadiumBorder(
+                                              side: BorderSide(
+                                                color: colorScheme.primary
+                                                    .withValues(alpha: 0.16),
+                                              ),
+                                            ),
+                                          ),
+                                        ),
+                                      ),
+                                    ),
+                                  ),
+                                  Row(
+                                    mainAxisSize: MainAxisSize.max,
+                                    mainAxisAlignment: MainAxisAlignment.center,
+                                    children: [
+                                      for (
+                                        var index = 0;
+                                        index < items.length;
+                                        index++
+                                      ) ...[
+                                        Expanded(
+                                          child: _MobileFloatingToolbarItem(
+                                            icon: items[index].icon,
+                                            selectedIcon:
+                                                items[index].selectedIcon,
+                                            label: items[index].label,
+                                            selected: index == selectedIndex,
+                                            showLabel: showLabels,
+                                            onPressed: () => onSelected(index),
+                                          ),
+                                        ),
+                                        if (index != items.length - 1)
+                                          const SizedBox(width: gap),
+                                      ],
+                                    ],
+                                  ),
+                                ],
+                              ),
+                            );
+                          },
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
               ),
             ),
           ),
@@ -5003,6 +7384,18 @@ class _MobileFloatingToolbarItem extends StatelessWidget {
         child: ScaleTransition(scale: curved, child: child),
       );
     }
+    if (label == 'Gửi file') {
+      return FadeTransition(
+        opacity: animation,
+        child: SlideTransition(
+          position: Tween<Offset>(
+            begin: Offset(selected ? -0.24 : 0.18, 0),
+            end: Offset.zero,
+          ).animate(curved),
+          child: ScaleTransition(scale: curved, child: child),
+        ),
+      );
+    }
     return FadeTransition(
       opacity: animation,
       child: SlideTransition(
@@ -5019,6 +7412,9 @@ class _MobileFloatingToolbarItem extends StatelessWidget {
   Widget build(BuildContext context) {
     final colorScheme = Theme.of(context).colorScheme;
     final foreground = selected ? Colors.black : colorScheme.onSurfaceVariant;
+    final iconSize = label == 'Gửi file'
+        ? (selected ? 25.0 : 24.0)
+        : (selected ? 21.0 : 20.0);
     return Tooltip(
       message: label,
       child: Material(
@@ -5049,14 +7445,30 @@ class _MobileFloatingToolbarItem extends StatelessWidget {
                         end: selected && label == 'Cài đặt'
                             ? 2.5
                             : selected && label == 'Lịch sử'
-                            ? -2
+                            ? -1
+                            : selected && label == 'Gửi file'
+                            ? 1
                             : 0,
                       ),
                       duration: const Duration(milliseconds: 620),
                       curve: Curves.easeOutCubic,
-                      builder: (context, turns, child) {
+                      builder: (context, value, child) {
+                        if (selected && label == 'Gửi file') {
+                          final pulse = math.sin(value * math.pi);
+                          return Transform.translate(
+                            offset: Offset(
+                              math.sin(value * math.pi * 2) * 2.8,
+                              0,
+                            ),
+                            child: Transform.scale(
+                              scaleX: 1 + pulse * 0.16,
+                              scaleY: 1 - pulse * 0.04,
+                              child: child,
+                            ),
+                          );
+                        }
                         return Transform.rotate(
-                          angle: turns * math.pi * 2,
+                          angle: value * math.pi * 2,
                           child: child,
                         );
                       },
@@ -5066,7 +7478,7 @@ class _MobileFloatingToolbarItem extends StatelessWidget {
                         curve: Curves.easeOutBack,
                         child: Icon(
                           selected ? selectedIcon : icon,
-                          size: selected ? 21 : 20,
+                          size: iconSize,
                           color: foreground,
                         ),
                       ),
@@ -5079,16 +7491,29 @@ class _MobileFloatingToolbarItem extends StatelessWidget {
                     child: showLabel
                         ? Padding(
                             padding: const EdgeInsets.only(top: 1),
-                            child: Text(
-                              label,
-                              maxLines: 1,
-                              overflow: TextOverflow.fade,
-                              softWrap: false,
-                              style: Theme.of(context).textTheme.labelSmall
-                                  ?.copyWith(
-                                    color: foreground,
-                                    fontWeight: FontWeight.w500,
+                            child: SizedBox(
+                              width: double.infinity,
+                              height: 12,
+                              child: FittedBox(
+                                fit: BoxFit.scaleDown,
+                                alignment: Alignment.center,
+                                child: Text(
+                                  label,
+                                  maxLines: 1,
+                                  overflow: TextOverflow.visible,
+                                  softWrap: false,
+                                  style: Theme.of(context).textTheme.labelSmall
+                                      ?.copyWith(
+                                        color: foreground,
+                                        fontWeight: FontWeight.w500,
+                                        height: 1.0,
+                                      ),
+                                  textHeightBehavior: const TextHeightBehavior(
+                                    applyHeightToFirstAscent: false,
+                                    applyHeightToLastDescent: false,
                                   ),
+                                ),
+                              ),
                             ),
                           )
                         : const SizedBox.shrink(),
@@ -5159,6 +7584,7 @@ class _TopBar extends StatelessWidget {
     required this.searchFocusNode,
     required this.onSearchChanged,
     required this.onClearUnpinned,
+    required this.onOpenReceivedFolder,
   });
 
   final String section;
@@ -5166,33 +7592,40 @@ class _TopBar extends StatelessWidget {
   final FocusNode searchFocusNode;
   final ValueChanged<String> onSearchChanged;
   final VoidCallback onClearUnpinned;
+  final VoidCallback onOpenReceivedFolder;
 
   @override
   Widget build(BuildContext context) {
     final colorScheme = Theme.of(context).colorScheme;
-    final isClipboardSection = section != 'Thiết bị' && section != 'Cài đặt';
+    final isClipboardSection =
+        section != 'Thiết bị' && section != 'Gửi file' && section != 'Cài đặt';
     final title = switch (section) {
       'Thiết bị' => 'Thiết bị LAN',
+      'Gửi file' => 'Gửi file',
       'Cài đặt' => 'Cài đặt',
       _ => 'Clipboard',
     };
     final subtitle = switch (section) {
       'Thiết bị' => '',
+      'Gửi file' => '',
       'Cài đặt' => '',
       _ => 'Tìm nhanh trong lịch sử clipboard.',
     };
     return SizedBox(
-      height: 76,
+      height: isClipboardSection ? 64 : 76,
       child: Material(
         color: colorScheme.surfaceContainerLowest,
         child: Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 14),
+          padding: EdgeInsets.symmetric(
+            horizontal: 20,
+            vertical: isClipboardSection ? 10 : 14,
+          ),
           child: Row(
             children: [
               Expanded(
                 child: isClipboardSection
                     ? SizedBox(
-                        height: 48,
+                        height: 42,
                         child: TextField(
                           controller: searchController,
                           focusNode: searchFocusNode,
@@ -5203,26 +7636,26 @@ class _TopBar extends StatelessWidget {
                             floatingLabelBehavior: FloatingLabelBehavior.auto,
                             prefixIcon: const Icon(Icons.search, size: 20),
                             prefixIconConstraints: const BoxConstraints(
-                              minWidth: 44,
-                              minHeight: 44,
+                              minWidth: 40,
+                              minHeight: 40,
                             ),
                             filled: true,
                             fillColor: colorScheme.surfaceContainerHigh,
                             contentPadding: const EdgeInsets.symmetric(
                               horizontal: 14,
-                              vertical: 12,
+                              vertical: 9,
                             ),
                             border: OutlineInputBorder(
-                              borderRadius: BorderRadius.circular(24),
+                              borderRadius: BorderRadius.circular(21),
                             ),
                             enabledBorder: OutlineInputBorder(
-                              borderRadius: BorderRadius.circular(24),
+                              borderRadius: BorderRadius.circular(21),
                               borderSide: BorderSide(
                                 color: colorScheme.outlineVariant,
                               ),
                             ),
                             focusedBorder: OutlineInputBorder(
-                              borderRadius: BorderRadius.circular(24),
+                              borderRadius: BorderRadius.circular(21),
                               borderSide: BorderSide(
                                 color: colorScheme.primary,
                                 width: 2,
@@ -5262,6 +7695,13 @@ class _TopBar extends StatelessWidget {
                     onPressed: onClearUnpinned,
                     icon: const Icon(Icons.clear_all),
                   ),
+                ),
+              ] else if (section == 'Gửi file') ...[
+                const SizedBox(width: 12),
+                OutlinedButton.icon(
+                  onPressed: onOpenReceivedFolder,
+                  icon: const Icon(Icons.folder_open),
+                  label: const Text('Mở folder'),
                 ),
               ],
             ],
@@ -5590,6 +8030,7 @@ class _QuickPickerShellState extends State<_QuickPickerShell> {
   int _selectedIndex = 0;
   bool _pinned = false;
   bool _showPinnedOnly = false;
+  bool _searchExpanded = false;
 
   @override
   void initState() {
@@ -5643,6 +8084,22 @@ class _QuickPickerShellState extends State<_QuickPickerShell> {
     final nextPinned = !_pinned;
     setState(() => _pinned = nextPinned);
     unawaited(_setQuickPickerAlwaysOnTop(nextPinned));
+  }
+
+  void _openSearchField() {
+    setState(() => _searchExpanded = true);
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (mounted) _focusNode.requestFocus();
+    });
+  }
+
+  void _clearAndCollapseSearch() {
+    setState(() {
+      _controller.clear();
+      _selectedIndex = 0;
+      _searchExpanded = false;
+    });
+    _focusNode.unfocus();
   }
 
   List<ClipboardEntry> get _filteredEntries {
@@ -5733,7 +8190,7 @@ class _QuickPickerShellState extends State<_QuickPickerShell> {
 
   void _scrollSelectedIntoView() {
     if (!_scrollController.hasClients) return;
-    const itemExtent = 86.0;
+    const itemExtent = 78.0;
     final viewport = _scrollController.position.viewportDimension;
     final minVisible = _scrollController.offset;
     final maxVisible = minVisible + viewport - itemExtent;
@@ -5804,9 +8261,9 @@ class _QuickPickerShellState extends State<_QuickPickerShell> {
           foregroundColor: active
               ? colorScheme.onSecondary
               : colorScheme.onSurfaceVariant,
-          fixedSize: const Size.square(40),
-          maximumSize: const Size.square(40),
-          minimumSize: const Size.square(40),
+          fixedSize: const Size.square(36),
+          maximumSize: const Size.square(36),
+          minimumSize: const Size.square(36),
           padding: EdgeInsets.zero,
           tapTargetSize: MaterialTapTargetSize.shrinkWrap,
         );
@@ -5815,82 +8272,111 @@ class _QuickPickerShellState extends State<_QuickPickerShell> {
       child: Material(
         color: colorScheme.surfaceContainerHigh,
         child: Padding(
-          padding: const EdgeInsets.fromLTRB(24, 22, 24, 8),
+          padding: const EdgeInsets.fromLTRB(20, 18, 20, 8),
           child: Column(
             children: [
               Row(
                 children: [
-                  SizedBox(
-                    width: 148,
-                    child: Focus(
-                      onKeyEvent: _handleKey,
-                      child: SizedBox(
-                        height: 40,
-                        child: TextField(
-                          controller: _controller,
-                          focusNode: _focusNode,
-                          mouseCursor: SystemMouseCursors.click,
-                          decoration: InputDecoration(
-                            isDense: true,
-                            labelText: 'Tìm kiếm',
-                            floatingLabelBehavior: FloatingLabelBehavior.auto,
-                            prefixIcon: const Icon(Icons.search, size: 20),
-                            prefixIconConstraints: const BoxConstraints(
-                              minWidth: 40,
-                              minHeight: 40,
-                            ),
-                            contentPadding: const EdgeInsets.symmetric(
-                              horizontal: 12,
-                              vertical: 10,
-                            ),
-                            border: OutlineInputBorder(
-                              borderRadius: BorderRadius.circular(20),
-                            ),
-                            enabledBorder: OutlineInputBorder(
-                              borderRadius: BorderRadius.circular(20),
-                              borderSide: BorderSide(
-                                color: colorScheme.outlineVariant,
+                  AnimatedContainer(
+                    duration: const Duration(milliseconds: 180),
+                    curve: Curves.easeOutCubic,
+                    width: _searchExpanded ? 128 : 36,
+                    child: _searchExpanded
+                        ? Focus(
+                            onKeyEvent: _handleKey,
+                            child: SizedBox(
+                              height: 36,
+                              child: TextField(
+                                controller: _controller,
+                                focusNode: _focusNode,
+                                mouseCursor: SystemMouseCursors.click,
+                                textInputAction: TextInputAction.search,
+                                decoration: InputDecoration(
+                                  isDense: true,
+                                  labelText: 'Tìm',
+                                  floatingLabelBehavior:
+                                      FloatingLabelBehavior.auto,
+                                  prefixIcon: const Icon(
+                                    Icons.search,
+                                    size: 18,
+                                  ),
+                                  suffixIcon: IconButton(
+                                    tooltip: 'Xóa tìm kiếm',
+                                    onPressed: _clearAndCollapseSearch,
+                                    icon: const Icon(Icons.close, size: 18),
+                                  ),
+                                  prefixIconConstraints: const BoxConstraints(
+                                    minWidth: 34,
+                                    minHeight: 34,
+                                  ),
+                                  suffixIconConstraints: const BoxConstraints(
+                                    minWidth: 32,
+                                    minHeight: 32,
+                                  ),
+                                  contentPadding: const EdgeInsets.symmetric(
+                                    horizontal: 8,
+                                    vertical: 8,
+                                  ),
+                                  border: OutlineInputBorder(
+                                    borderRadius: BorderRadius.circular(18),
+                                  ),
+                                  enabledBorder: OutlineInputBorder(
+                                    borderRadius: BorderRadius.circular(18),
+                                    borderSide: BorderSide(
+                                      color: colorScheme.outlineVariant,
+                                    ),
+                                  ),
+                                  focusedBorder: OutlineInputBorder(
+                                    borderRadius: BorderRadius.circular(18),
+                                    borderSide: BorderSide(
+                                      color: colorScheme.primary,
+                                      width: 2,
+                                    ),
+                                  ),
+                                ),
+                                onChanged: (_) =>
+                                    setState(() => _selectedIndex = 0),
+                                onSubmitted: (_) => _selectFirstVisible(),
                               ),
                             ),
-                            focusedBorder: OutlineInputBorder(
-                              borderRadius: BorderRadius.circular(20),
-                              borderSide: BorderSide(
-                                color: colorScheme.primary,
-                                width: 2,
-                              ),
+                          )
+                        : Tooltip(
+                            message: 'Tìm',
+                            child: IconButton(
+                              style: quickPickerToolButtonStyle(),
+                              onPressed: _openSearchField,
+                              icon: const Icon(Icons.search, size: 20),
                             ),
                           ),
-                          onChanged: (_) => setState(() => _selectedIndex = 0),
-                          onSubmitted: (_) => _selectFirstVisible(),
-                        ),
-                      ),
-                    ),
                   ),
                   const SizedBox(width: 8),
                   Expanded(
-                    child: _HorizontalWheelScroll(
-                      height: 38,
-                      children: [
-                        _ConnectedButtonGroup(
-                          segments: [
+                    child: SizedBox(
+                      height: 34,
+                      child: _ConnectedButtonGroup(
+                        expanded: true,
+                        height: 34,
+                        iconSize: 17,
+                        gap: 2,
+                        iconOnlyHorizontalPadding: 0,
+                        segments: [
+                          _ConnectedButtonSegment(
+                            label: 'Tất cả',
+                            icon: Icons.all_inclusive,
+                            selected: _selectedKindFilter == null,
+                            iconOnly: true,
+                            onPressed: () => _setKindFilter(null),
+                          ),
+                          for (final kind in ClipboardKind.values)
                             _ConnectedButtonSegment(
-                              label: 'Tất cả',
-                              icon: Icons.all_inclusive,
-                              selected: _selectedKindFilter == null,
+                              label: _quickPickerKindLabel(kind),
+                              icon: _kindIcon(kind),
+                              selected: _selectedKindFilter == kind,
                               iconOnly: true,
-                              onPressed: () => _setKindFilter(null),
+                              onPressed: () => _setKindFilter(kind),
                             ),
-                            for (final kind in ClipboardKind.values)
-                              _ConnectedButtonSegment(
-                                label: _quickPickerKindLabel(kind),
-                                icon: _kindIcon(kind),
-                                selected: _selectedKindFilter == kind,
-                                iconOnly: true,
-                                onPressed: () => _setKindFilter(kind),
-                              ),
-                          ],
-                        ),
-                      ],
+                        ],
+                      ),
                     ),
                   ),
                   const SizedBox(width: 8),
@@ -5968,7 +8454,7 @@ class _QuickPickerShellState extends State<_QuickPickerShell> {
                   ),
                 ],
               ),
-              const SizedBox(height: 12),
+              const SizedBox(height: 10),
               Expanded(
                 child: entries.isEmpty
                     ? Center(
@@ -5983,7 +8469,7 @@ class _QuickPickerShellState extends State<_QuickPickerShell> {
                         entries: entries,
                         promotedEntryId: _quickPickerPromotedEntryId,
                         promotionToken: _quickPickerPromotionToken,
-                        itemSpacing: 6,
+                        itemSpacing: 5,
                         itemBuilder: (context, entry, index) {
                           return _QuickPickerRow(
                             entry: entry,
@@ -6072,7 +8558,7 @@ class _QuickPickerTagFilterBarState extends State<_QuickPickerTagFilterBar> {
       },
     );
     return SizedBox(
-      height: 38,
+      height: 34,
       child: Listener(
         onPointerSignal: _handlePointerSignal,
         child: ScrollConfiguration(
@@ -6082,6 +8568,11 @@ class _QuickPickerTagFilterBarState extends State<_QuickPickerTagFilterBar> {
             scrollDirection: Axis.horizontal,
             children: [
               _ConnectedButtonGroup(
+                height: 34,
+                iconSize: 17,
+                gap: 2,
+                iconOnlyHorizontalPadding: 11,
+                labelHorizontalPadding: 9,
                 segments: [
                   _ConnectedButtonSegment(
                     label: 'Tất cả',
@@ -6101,7 +8592,7 @@ class _QuickPickerTagFilterBarState extends State<_QuickPickerTagFilterBar> {
                       iconColor:
                           widget.tagDefinitions[tag]?.color ??
                           colorScheme.tertiary,
-                      maxLabelWidth: 112,
+                      maxLabelWidth: 86,
                       onPressed: () => widget.onToggle(tag),
                     ),
                 ],
@@ -6223,13 +8714,13 @@ class _QuickPickerRow extends StatelessWidget {
               onSelected();
             },
             child: Padding(
-              padding: EdgeInsets.fromLTRB(selected ? 8 : 12, 12, 12, 12),
+              padding: EdgeInsets.fromLTRB(selected ? 7 : 10, 10, 10, 10),
               child: Row(
                 children: [
                   AnimatedContainer(
                     duration: const Duration(milliseconds: 120),
                     width: selected ? 4 : 0,
-                    height: 52,
+                    height: 46,
                     decoration: ShapeDecoration(
                       color: colorScheme.primary,
                       shape: const StadiumBorder(),
@@ -6238,12 +8729,12 @@ class _QuickPickerRow extends StatelessWidget {
                   if (selected) const SizedBox(width: 8),
                   Icon(
                     _kindIcon(entry.kind),
-                    size: 18,
+                    size: 17,
                     color: selected
                         ? colorScheme.onSecondaryContainer
                         : colorScheme.onSurfaceVariant,
                   ),
-                  const SizedBox(width: 12),
+                  const SizedBox(width: 10),
                   Expanded(
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
@@ -6255,12 +8746,13 @@ class _QuickPickerRow extends StatelessWidget {
                                 entry.preview,
                                 maxLines: 1,
                                 overflow: TextOverflow.ellipsis,
-                                style: Theme.of(context).textTheme.bodyMedium
+                                style: Theme.of(context).textTheme.bodySmall
                                     ?.copyWith(
                                       color: selected
                                           ? colorScheme.onSecondaryContainer
                                           : colorScheme.onSurface,
                                       fontWeight: FontWeight.w800,
+                                      height: 1.08,
                                     ),
                               ),
                             ),
@@ -6270,7 +8762,7 @@ class _QuickPickerRow extends StatelessWidget {
                         Row(
                           children: [
                             if (_hasUsableSourceIcon(entry)) ...[
-                              _SourceAppIcon(entry: entry, dimension: 18),
+                              _SourceAppIcon(entry: entry, dimension: 16),
                               const SizedBox(width: 6),
                             ],
                             Expanded(
@@ -6283,6 +8775,8 @@ class _QuickPickerRow extends StatelessWidget {
                                       color: selected
                                           ? colorScheme.onSecondaryContainer
                                           : colorScheme.onSurfaceVariant,
+                                      fontSize: 11.5,
+                                      height: 1.05,
                                     ),
                               ),
                             ),
@@ -6294,7 +8788,7 @@ class _QuickPickerRow extends StatelessWidget {
                           ],
                         ),
                         if (entry.tags.isNotEmpty) ...[
-                          const SizedBox(height: 8),
+                          const SizedBox(height: 6),
                           Wrap(
                             spacing: 6,
                             runSpacing: 6,
@@ -6302,7 +8796,7 @@ class _QuickPickerRow extends StatelessWidget {
                               for (final tag in entry.tags.take(3))
                                 ConstrainedBox(
                                   constraints: const BoxConstraints(
-                                    maxWidth: 122,
+                                    maxWidth: 110,
                                   ),
                                   child: _TagBadge(
                                     label: tag,
@@ -6318,21 +8812,21 @@ class _QuickPickerRow extends StatelessWidget {
                   if (entry.kind == ClipboardKind.image &&
                       entry.imageBytes != null &&
                       entry.imageBytes!.isNotEmpty) ...[
-                    const SizedBox(width: 10),
+                    const SizedBox(width: 8),
                     _QuickPickerImageThumb(imageBytes: entry.imageBytes!),
                   ],
-                  const SizedBox(width: 12),
+                  const SizedBox(width: 10),
                   Tooltip(
                     message: entry.pinned ? 'Bỏ ghim mục này' : 'Ghim mục này',
                     child: SizedBox.square(
-                      dimension: 34,
+                      dimension: 32,
                       child: IconButton(
                         visualDensity: VisualDensity.compact,
                         style: IconButton.styleFrom(
                           alignment: Alignment.center,
-                          fixedSize: const Size.square(34),
-                          maximumSize: const Size.square(34),
-                          minimumSize: const Size.square(34),
+                          fixedSize: const Size.square(32),
+                          maximumSize: const Size.square(32),
+                          minimumSize: const Size.square(32),
                           padding: EdgeInsets.zero,
                           tapTargetSize: MaterialTapTargetSize.shrinkWrap,
                           backgroundColor: entry.pinned
@@ -6343,7 +8837,7 @@ class _QuickPickerRow extends StatelessWidget {
                               : colorScheme.onSurfaceVariant,
                         ),
                         onPressed: onTogglePin,
-                        iconSize: 18,
+                        iconSize: 17,
                         icon: Icon(
                           entry.pinned ? Icons.bookmark : Icons.bookmark_border,
                         ),
@@ -6371,8 +8865,8 @@ class _QuickPickerImageThumb extends StatelessWidget {
     return ClipRRect(
       borderRadius: BorderRadius.circular(8),
       child: Container(
-        width: 52,
-        height: 52,
+        width: 46,
+        height: 46,
         color: colorScheme.surfaceContainerHighest,
         child: Image.memory(
           imageBytes,
@@ -6665,9 +9159,10 @@ class _HistoryList extends StatelessWidget {
     required this.tagDefinitions,
     required this.promotedEntryId,
     required this.promotionToken,
-    required this.availableTags,
     required this.selectedKind,
-    required this.selectedTags,
+    required this.selectedScope,
+    required this.selectedScopePosition,
+    required this.showScopeFilter,
     required this.bulkSelectMode,
     required this.bulkSelectedIds,
     required this.selectedIndex,
@@ -6675,8 +9170,7 @@ class _HistoryList extends StatelessWidget {
     this.compact = false,
     this.bottomContentPadding = 12,
     required this.onKindSelected,
-    required this.onTagToggled,
-    required this.onClearTagFilters,
+    required this.onScopeSelected,
     required this.onCopy,
     required this.onTogglePin,
     required this.onEditTags,
@@ -6700,9 +9194,10 @@ class _HistoryList extends StatelessWidget {
   final Map<String, TagDefinition> tagDefinitions;
   final String? promotedEntryId;
   final int promotionToken;
-  final List<String> availableTags;
   final ClipboardKind? selectedKind;
-  final Set<String> selectedTags;
+  final _HistoryScopeFilter selectedScope;
+  final double selectedScopePosition;
+  final bool showScopeFilter;
   final bool bulkSelectMode;
   final Set<String> bulkSelectedIds;
   final int selectedIndex;
@@ -6710,8 +9205,7 @@ class _HistoryList extends StatelessWidget {
   final bool compact;
   final double bottomContentPadding;
   final ValueChanged<ClipboardKind?> onKindSelected;
-  final ValueChanged<String> onTagToggled;
-  final VoidCallback onClearTagFilters;
+  final ValueChanged<_HistoryScopeFilter> onScopeSelected;
   final ValueChanged<ClipboardEntry> onCopy;
   final ValueChanged<ClipboardEntry> onTogglePin;
   final ValueChanged<ClipboardEntry> onEditTags;
@@ -6736,7 +9230,7 @@ class _HistoryList extends StatelessWidget {
         entries.every((entry) => bulkSelectedIds.contains(entry.id));
     final isTagSection = onManageTags != null;
     return Material(
-      color: colorScheme.surface,
+      color: colorScheme.surfaceContainerLowest,
       child: Column(
         children: [
           SizedBox(
@@ -6872,14 +9366,13 @@ class _HistoryList extends StatelessWidget {
             ),
           ),
           _HistoryFilterBar(
-            availableTags: availableTags,
-            tagDefinitions: tagDefinitions,
             selectedKind: selectedKind,
-            selectedTags: selectedTags,
+            selectedScope: selectedScope,
+            selectedScopePosition: selectedScopePosition,
+            showScopeFilter: showScopeFilter,
             compact: compact,
             onKindSelected: onKindSelected,
-            onTagToggled: onTagToggled,
-            onClearTagFilters: onClearTagFilters,
+            onScopeSelected: onScopeSelected,
           ),
           Expanded(
             child: !loaded
@@ -7351,15 +9844,10 @@ class _ExpressiveFabMenuActionState extends State<_ExpressiveFabMenuAction> {
 }
 
 class _HorizontalWheelScroll extends StatefulWidget {
-  const _HorizontalWheelScroll({
-    required this.height,
-    required this.children,
-    this.showOverflowHint = false,
-  });
+  const _HorizontalWheelScroll({required this.height, required this.children});
 
   final double height;
   final List<Widget> children;
-  final bool showOverflowHint;
 
   @override
   State<_HorizontalWheelScroll> createState() => _HorizontalWheelScrollState();
@@ -7367,35 +9855,17 @@ class _HorizontalWheelScroll extends StatefulWidget {
 
 class _HorizontalWheelScrollState extends State<_HorizontalWheelScroll> {
   late final ScrollController _scrollController;
-  bool _canScrollForward = false;
 
   @override
   void initState() {
     super.initState();
     _scrollController = ScrollController();
-    _scrollController.addListener(_syncOverflowHint);
-    WidgetsBinding.instance.addPostFrameCallback((_) => _syncOverflowHint());
-  }
-
-  @override
-  void didUpdateWidget(covariant _HorizontalWheelScroll oldWidget) {
-    super.didUpdateWidget(oldWidget);
-    WidgetsBinding.instance.addPostFrameCallback((_) => _syncOverflowHint());
   }
 
   @override
   void dispose() {
-    _scrollController.removeListener(_syncOverflowHint);
     _scrollController.dispose();
     super.dispose();
-  }
-
-  void _syncOverflowHint() {
-    if (!mounted || !_scrollController.hasClients) return;
-    final position = _scrollController.position;
-    final nextCanScrollForward = position.maxScrollExtent - position.pixels > 2;
-    if (nextCanScrollForward == _canScrollForward) return;
-    setState(() => _canScrollForward = nextCanScrollForward);
   }
 
   void _handlePointerSignal(PointerSignalEvent event) {
@@ -7413,20 +9883,6 @@ class _HorizontalWheelScrollState extends State<_HorizontalWheelScroll> {
     _scrollController.jumpTo(target.toDouble());
   }
 
-  void _scrollForward() {
-    if (!_scrollController.hasClients) return;
-    final position = _scrollController.position;
-    final target = (position.pixels + 160).clamp(
-      position.minScrollExtent,
-      position.maxScrollExtent,
-    );
-    _scrollController.animateTo(
-      target.toDouble(),
-      duration: const Duration(milliseconds: 240),
-      curve: Curves.easeOutCubic,
-    );
-  }
-
   @override
   Widget build(BuildContext context) {
     final scrollBehavior = ScrollConfiguration.of(context).copyWith(
@@ -7438,7 +9894,6 @@ class _HorizontalWheelScrollState extends State<_HorizontalWheelScroll> {
         PointerDeviceKind.unknown,
       },
     );
-    final colorScheme = Theme.of(context).colorScheme;
     return SizedBox(
       height: widget.height,
       child: Stack(
@@ -7450,60 +9905,10 @@ class _HorizontalWheelScrollState extends State<_HorizontalWheelScroll> {
               child: ListView(
                 controller: _scrollController,
                 scrollDirection: Axis.horizontal,
-                padding: EdgeInsets.only(
-                  right: widget.showOverflowHint ? widget.height + 6 : 0,
-                ),
                 children: widget.children,
               ),
             ),
           ),
-          if (widget.showOverflowHint)
-            Positioned(
-              right: 0,
-              top: 0,
-              bottom: 0,
-              child: IgnorePointer(
-                ignoring: !_canScrollForward,
-                child: AnimatedOpacity(
-                  opacity: _canScrollForward ? 1 : 0,
-                  duration: const Duration(milliseconds: 160),
-                  curve: Curves.easeOutCubic,
-                  child: DecoratedBox(
-                    decoration: BoxDecoration(
-                      gradient: LinearGradient(
-                        begin: Alignment.centerLeft,
-                        end: Alignment.centerRight,
-                        colors: [
-                          colorScheme.surface.withValues(alpha: 0),
-                          colorScheme.surface,
-                        ],
-                      ),
-                    ),
-                    child: Align(
-                      alignment: Alignment.centerRight,
-                      child: Material(
-                        color: colorScheme.secondaryContainer,
-                        shape: const StadiumBorder(),
-                        clipBehavior: Clip.antiAlias,
-                        child: InkWell(
-                          mouseCursor: SystemMouseCursors.click,
-                          onTap: _scrollForward,
-                          customBorder: const StadiumBorder(),
-                          child: SizedBox.square(
-                            dimension: widget.height,
-                            child: Icon(
-                              Icons.chevron_right,
-                              size: 20,
-                              color: colorScheme.onSecondaryContainer,
-                            ),
-                          ),
-                        ),
-                      ),
-                    ),
-                  ),
-                ),
-              ),
-            ),
         ],
       ),
     );
@@ -7512,34 +9917,32 @@ class _HorizontalWheelScrollState extends State<_HorizontalWheelScroll> {
 
 class _HistoryFilterBar extends StatelessWidget {
   const _HistoryFilterBar({
-    required this.availableTags,
-    required this.tagDefinitions,
     required this.selectedKind,
-    required this.selectedTags,
+    required this.selectedScope,
+    required this.selectedScopePosition,
+    required this.showScopeFilter,
     this.compact = false,
     required this.onKindSelected,
-    required this.onTagToggled,
-    required this.onClearTagFilters,
+    required this.onScopeSelected,
   });
 
-  final List<String> availableTags;
-  final Map<String, TagDefinition> tagDefinitions;
   final ClipboardKind? selectedKind;
-  final Set<String> selectedTags;
+  final _HistoryScopeFilter selectedScope;
+  final double selectedScopePosition;
+  final bool showScopeFilter;
   final bool compact;
   final ValueChanged<ClipboardKind?> onKindSelected;
-  final ValueChanged<String> onTagToggled;
-  final VoidCallback onClearTagFilters;
+  final ValueChanged<_HistoryScopeFilter> onScopeSelected;
 
   @override
   Widget build(BuildContext context) {
-    final colorScheme = Theme.of(context).colorScheme;
     return LayoutBuilder(
       builder: (context, constraints) {
         final width = constraints.maxWidth;
         final tight = width < 380;
         final medium = width >= 380 && width < 520;
-        final adaptiveCompact = compact || width < 560;
+        final iconOnlyCategories = width < 560;
+        const expandCategoryButtons = true;
         final buttonHeight = tight
             ? 34.0
             : medium
@@ -7561,7 +9964,7 @@ class _HistoryFilterBar extends StatelessWidget {
             ? 9.0
             : 10.0;
         final groupGap = tight ? 2.0 : 3.0;
-        final rowGap = tight ? 5.0 : 6.0;
+        final rowGap = tight ? 6.0 : 7.0;
 
         return Padding(
           padding: EdgeInsets.fromLTRB(tight ? 10 : 12, 0, tight ? 10 : 12, 10),
@@ -7572,7 +9975,7 @@ class _HistoryFilterBar extends StatelessWidget {
                 height: buttonHeight,
                 width: double.infinity,
                 child: _ConnectedButtonGroup(
-                  expanded: adaptiveCompact,
+                  expanded: expandCategoryButtons,
                   height: buttonHeight,
                   iconSize: iconSize,
                   iconOnlyHorizontalPadding: iconPadding,
@@ -7583,7 +9986,7 @@ class _HistoryFilterBar extends StatelessWidget {
                       label: 'Tất cả',
                       icon: Icons.all_inclusive,
                       selected: selectedKind == null,
-                      iconOnly: adaptiveCompact,
+                      iconOnly: iconOnlyCategories,
                       onPressed: () => onKindSelected(null),
                     ),
                     for (final kind in ClipboardKind.values)
@@ -7591,65 +9994,268 @@ class _HistoryFilterBar extends StatelessWidget {
                         label: _shortKindLabel(kind),
                         icon: _kindIcon(kind),
                         selected: selectedKind == kind,
-                        iconOnly: adaptiveCompact,
+                        iconOnly: iconOnlyCategories,
                         onPressed: () => onKindSelected(kind),
                       ),
                   ],
                 ),
               ),
-              if (availableTags.isNotEmpty) ...[
+              if (showScopeFilter) ...[
                 SizedBox(height: rowGap),
-                _HorizontalWheelScroll(
-                  height: buttonHeight,
-                  showOverflowHint: true,
-                  children: [
-                    _ConnectedButtonGroup(
-                      height: buttonHeight,
-                      iconSize: iconSize,
-                      iconOnlyHorizontalPadding: iconPadding,
-                      labelHorizontalPadding: labelPadding,
-                      gap: groupGap,
-                      segments: [
-                        _ConnectedButtonSegment(
-                          label: 'Tất cả',
-                          icon: Icons.all_inclusive,
-                          selected: selectedTags.isEmpty,
-                          iconOnly: false,
-                          hideIcon: true,
-                          horizontalPadding: iconPadding,
-                          maxLabelWidth: tight ? 58 : 72,
-                          onPressed: onClearTagFilters,
-                        ),
-                        for (final tag in availableTags)
-                          _ConnectedButtonSegment(
-                            label: tag,
-                            icon: selectedTags.contains(tag)
-                                ? Icons.check
-                                : tagDefinitions[tag]?.icon ??
-                                      Icons.sell_outlined,
-                            selected: selectedTags.contains(tag),
-                            iconColor:
-                                tagDefinitions[tag]?.color ??
-                                colorScheme.tertiary,
-                            maxLabelWidth: tight
-                                ? 82
-                                : medium
-                                ? 104
-                                : adaptiveCompact
-                                ? 118
-                                : 128,
-                            iconOnly: false,
-                            onPressed: () => onTagToggled(tag),
-                          ),
-                      ],
-                    ),
-                  ],
+                _HistoryScopePillBar(
+                  selected: selectedScope,
+                  selectedPosition: selectedScopePosition,
+                  height: tight ? 30 : 32,
+                  compact: iconOnlyCategories,
+                  onSelected: onScopeSelected,
                 ),
               ],
             ],
           ),
         );
       },
+    );
+  }
+}
+
+class _HistoryScopePillBar extends StatelessWidget {
+  const _HistoryScopePillBar({
+    required this.selected,
+    required this.selectedPosition,
+    required this.height,
+    required this.compact,
+    required this.onSelected,
+  });
+
+  final _HistoryScopeFilter selected;
+  final double selectedPosition;
+  final double height;
+  final bool compact;
+  final ValueChanged<_HistoryScopeFilter> onSelected;
+
+  @override
+  Widget build(BuildContext context) {
+    final colorScheme = Theme.of(context).colorScheme;
+    final isDark = colorScheme.brightness == Brightness.dark;
+    final items =
+        <
+          ({
+            _HistoryScopeFilter value,
+            String label,
+            IconData icon,
+            IconData selectedIcon,
+          })
+        >[
+          (
+            value: _HistoryScopeFilter.all,
+            label: 'Tất cả',
+            icon: Icons.all_inclusive,
+            selectedIcon: Icons.all_inclusive,
+          ),
+          (
+            value: _HistoryScopeFilter.pinned,
+            label: 'Ghim',
+            icon: Icons.bookmark_border,
+            selectedIcon: Icons.bookmark,
+          ),
+          (
+            value: _HistoryScopeFilter.tagged,
+            label: 'Gắn thẻ',
+            icon: Icons.sell_outlined,
+            selectedIcon: Icons.sell,
+          ),
+        ];
+    final selectedIndex = items.indexWhere((item) => item.value == selected);
+    final safeSelectedIndex = selectedIndex < 0 ? 0 : selectedIndex;
+    final safeSelectedPosition = selectedPosition.clamp(
+      0.0,
+      (items.length - 1).toDouble(),
+    );
+    final dragging =
+        (safeSelectedPosition - safeSelectedIndex.toDouble()).abs() > 0.001;
+    final glassFill = colorScheme.surfaceContainerHigh.withValues(
+      alpha: isDark ? 0.64 : 0.58,
+    );
+    final glassBorder = Color.alphaBlend(
+      colorScheme.primary.withValues(alpha: isDark ? 0.16 : 0.08),
+      colorScheme.outlineVariant.withValues(alpha: 0.34),
+    );
+    final activePillColor = Color.alphaBlend(
+      colorScheme.primary.withValues(alpha: isDark ? 0.30 : 0.20),
+      colorScheme.surfaceContainerHighest.withValues(alpha: 0.76),
+    );
+
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final width = constraints.maxWidth;
+        return SizedBox(
+          width: width,
+          height: height,
+          child: ClipRRect(
+            borderRadius: BorderRadius.circular(999),
+            child: BackdropFilter(
+              filter: ui.ImageFilter.blur(sigmaX: 8, sigmaY: 8),
+              child: DecoratedBox(
+                decoration: ShapeDecoration(
+                  color: glassFill,
+                  shape: StadiumBorder(
+                    side: BorderSide(color: glassBorder, width: 1),
+                  ),
+                ),
+                child: Padding(
+                  padding: const EdgeInsets.all(3),
+                  child: LayoutBuilder(
+                    builder: (context, innerConstraints) {
+                      const gap = 3.0;
+                      final itemWidth =
+                          (innerConstraints.maxWidth -
+                              gap * (items.length - 1)) /
+                          items.length;
+                      final indicatorLeft =
+                          safeSelectedPosition * (itemWidth + gap);
+                      final indicator = IgnorePointer(
+                        child: TweenAnimationBuilder<double>(
+                          key: ValueKey(
+                            'history-scope-pill-$safeSelectedIndex',
+                          ),
+                          tween: Tween(begin: 0, end: 1),
+                          duration: dragging
+                              ? Duration.zero
+                              : const Duration(milliseconds: 300),
+                          curve: Curves.easeOutCubic,
+                          builder: (context, value, child) {
+                            final squash = math.sin(value * math.pi);
+                            return Transform.scale(
+                              scaleX: 1 + squash * 0.025,
+                              scaleY: 1 - squash * 0.10,
+                              child: child,
+                            );
+                          },
+                          child: DecoratedBox(
+                            decoration: ShapeDecoration(
+                              color: activePillColor,
+                              shape: StadiumBorder(
+                                side: BorderSide(
+                                  color: colorScheme.primary.withValues(
+                                    alpha: 0.12,
+                                  ),
+                                ),
+                              ),
+                            ),
+                          ),
+                        ),
+                      );
+                      return Stack(
+                        children: [
+                          if (dragging)
+                            Positioned(
+                              left: indicatorLeft,
+                              top: 0,
+                              width: itemWidth,
+                              height: innerConstraints.maxHeight,
+                              child: indicator,
+                            )
+                          else
+                            AnimatedPositioned(
+                              duration: const Duration(milliseconds: 300),
+                              curve: Curves.easeOutCubic,
+                              left: indicatorLeft,
+                              top: 0,
+                              width: itemWidth,
+                              height: innerConstraints.maxHeight,
+                              child: indicator,
+                            ),
+                          Row(
+                            children: [
+                              for (var index = 0; index < items.length; index++)
+                                Expanded(
+                                  child: Padding(
+                                    padding: EdgeInsets.only(
+                                      right: index == items.length - 1
+                                          ? 0
+                                          : gap,
+                                    ),
+                                    child: _HistoryScopePillButton(
+                                      label: items[index].label,
+                                      icon: items[index].icon,
+                                      selectedIcon: items[index].selectedIcon,
+                                      selected: index == safeSelectedIndex,
+                                      onPressed: () =>
+                                          onSelected(items[index].value),
+                                    ),
+                                  ),
+                                ),
+                            ],
+                          ),
+                        ],
+                      );
+                    },
+                  ),
+                ),
+              ),
+            ),
+          ),
+        );
+      },
+    );
+  }
+}
+
+class _HistoryScopePillButton extends StatelessWidget {
+  const _HistoryScopePillButton({
+    required this.label,
+    required this.icon,
+    required this.selectedIcon,
+    required this.selected,
+    required this.onPressed,
+  });
+
+  final String label;
+  final IconData icon;
+  final IconData selectedIcon;
+  final bool selected;
+  final VoidCallback onPressed;
+
+  @override
+  Widget build(BuildContext context) {
+    final colorScheme = Theme.of(context).colorScheme;
+    final foreground = selected
+        ? colorScheme.onSurface
+        : colorScheme.onSurfaceVariant;
+    return Material(
+      color: Colors.transparent,
+      shape: const StadiumBorder(),
+      clipBehavior: Clip.antiAlias,
+      child: InkWell(
+        onTap: onPressed,
+        mouseCursor: SystemMouseCursors.click,
+        customBorder: const StadiumBorder(),
+        child: Center(
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(
+                selected ? selectedIcon : icon,
+                size: selected ? 16 : 15,
+                color: foreground,
+              ),
+              const SizedBox(width: 5),
+              Flexible(
+                child: Text(
+                  label,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: Theme.of(context).textTheme.labelMedium?.copyWith(
+                    color: foreground,
+                    fontWeight: selected ? FontWeight.w800 : FontWeight.w500,
+                    height: 1,
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
     );
   }
 }
@@ -7663,8 +10269,6 @@ class _ConnectedButtonSegment {
     this.iconColor,
     this.maxLabelWidth,
     this.iconOnly = false,
-    this.hideIcon = false,
-    this.horizontalPadding,
   });
 
   final String label;
@@ -7674,8 +10278,6 @@ class _ConnectedButtonSegment {
   final Color? iconColor;
   final double? maxLabelWidth;
   final bool iconOnly;
-  final bool hideIcon;
-  final double? horizontalPadding;
 }
 
 class _ConnectedButtonGroup extends StatefulWidget {
@@ -7706,6 +10308,7 @@ class _ConnectedButtonGroupState extends State<_ConnectedButtonGroup> {
   late List<GlobalKey> _itemKeys;
   double _indicatorLeft = 0;
   double _indicatorWidth = 0;
+  double? _lastLayoutWidth;
 
   int get _selectedIndex {
     final index = widget.segments.indexWhere((segment) => segment.selected);
@@ -7760,68 +10363,85 @@ class _ConnectedButtonGroupState extends State<_ConnectedButtonGroup> {
         .where((segment) => segment.selected)
         .length;
     final useMovingIndicator = selectedCount <= 1;
-    return Stack(
-      key: _groupKey,
-      clipBehavior: Clip.none,
-      children: [
-        if (useMovingIndicator && _indicatorWidth > 0)
-          AnimatedPositioned(
-            duration: const Duration(milliseconds: 260),
-            curve: Curves.easeInOutCubicEmphasized,
-            left: _indicatorLeft,
-            top: 0,
-            width: _indicatorWidth,
-            height: widget.height,
-            child: DecoratedBox(
-              decoration: ShapeDecoration(
-                color: colorScheme.secondary,
-                shape: const StadiumBorder(),
-              ),
-            ),
-          ),
-        Row(
-          mainAxisSize: widget.expanded ? MainAxisSize.max : MainAxisSize.min,
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final layoutWidth = constraints.maxWidth;
+        if (_lastLayoutWidth == null ||
+            (_lastLayoutWidth! - layoutWidth).abs() > 0.5) {
+          _lastLayoutWidth = layoutWidth;
+          WidgetsBinding.instance.addPostFrameCallback((_) => _syncIndicator());
+        }
+        return Stack(
+          key: _groupKey,
+          clipBehavior: Clip.none,
           children: [
-            for (var index = 0; index < widget.segments.length; index++) ...[
-              if (widget.expanded)
-                Expanded(
-                  child: KeyedSubtree(
-                    key: _itemKeys[index],
-                    child: _ConnectedButtonGroupItem(
-                      segment: widget.segments[index],
-                      index: index,
-                      count: widget.segments.length,
-                      useMovingIndicator: useMovingIndicator,
-                      height: widget.height,
-                      iconSize: widget.iconSize,
-                      iconOnlyHorizontalPadding:
-                          widget.iconOnlyHorizontalPadding,
-                      labelHorizontalPadding: widget.labelHorizontalPadding,
-                      expanded: true,
-                    ),
-                  ),
-                )
-              else
-                KeyedSubtree(
-                  key: _itemKeys[index],
-                  child: _ConnectedButtonGroupItem(
-                    segment: widget.segments[index],
-                    index: index,
-                    count: widget.segments.length,
-                    useMovingIndicator: useMovingIndicator,
-                    height: widget.height,
-                    iconSize: widget.iconSize,
-                    iconOnlyHorizontalPadding: widget.iconOnlyHorizontalPadding,
-                    labelHorizontalPadding: widget.labelHorizontalPadding,
-                    expanded: false,
+            if (useMovingIndicator && _indicatorWidth > 0)
+              AnimatedPositioned(
+                duration: const Duration(milliseconds: 260),
+                curve: Curves.easeInOutCubicEmphasized,
+                left: _indicatorLeft,
+                top: 0,
+                width: _indicatorWidth,
+                height: widget.height,
+                child: DecoratedBox(
+                  decoration: ShapeDecoration(
+                    color: colorScheme.secondary,
+                    shape: const StadiumBorder(),
                   ),
                 ),
-              if (index != widget.segments.length - 1)
-                SizedBox(width: widget.gap),
-            ],
+              ),
+            Row(
+              mainAxisSize: widget.expanded
+                  ? MainAxisSize.max
+                  : MainAxisSize.min,
+              children: [
+                for (
+                  var index = 0;
+                  index < widget.segments.length;
+                  index++
+                ) ...[
+                  if (widget.expanded)
+                    Expanded(
+                      child: KeyedSubtree(
+                        key: _itemKeys[index],
+                        child: _ConnectedButtonGroupItem(
+                          segment: widget.segments[index],
+                          index: index,
+                          count: widget.segments.length,
+                          useMovingIndicator: useMovingIndicator,
+                          height: widget.height,
+                          iconSize: widget.iconSize,
+                          iconOnlyHorizontalPadding:
+                              widget.iconOnlyHorizontalPadding,
+                          labelHorizontalPadding: widget.labelHorizontalPadding,
+                          expanded: true,
+                        ),
+                      ),
+                    )
+                  else
+                    KeyedSubtree(
+                      key: _itemKeys[index],
+                      child: _ConnectedButtonGroupItem(
+                        segment: widget.segments[index],
+                        index: index,
+                        count: widget.segments.length,
+                        useMovingIndicator: useMovingIndicator,
+                        height: widget.height,
+                        iconSize: widget.iconSize,
+                        iconOnlyHorizontalPadding:
+                            widget.iconOnlyHorizontalPadding,
+                        labelHorizontalPadding: widget.labelHorizontalPadding,
+                        expanded: false,
+                      ),
+                    ),
+                  if (index != widget.segments.length - 1)
+                    SizedBox(width: widget.gap),
+                ],
+              ],
+            ),
           ],
-        ),
-      ],
+        );
+      },
     );
   }
 }
@@ -7889,11 +10509,9 @@ class _ConnectedButtonGroupItem extends StatelessWidget {
           curve: Curves.easeOutCubic,
           height: height,
           padding: EdgeInsets.symmetric(
-            horizontal:
-                segment.horizontalPadding ??
-                (segment.iconOnly
-                    ? iconOnlyHorizontalPadding
-                    : labelHorizontalPadding),
+            horizontal: segment.iconOnly
+                ? iconOnlyHorizontalPadding
+                : labelHorizontalPadding,
           ),
           decoration: ShapeDecoration(
             color: segment.selected && useMovingIndicator
@@ -7907,10 +10525,9 @@ class _ConnectedButtonGroupItem extends StatelessWidget {
             mainAxisSize: expanded ? MainAxisSize.max : MainAxisSize.min,
             mainAxisAlignment: MainAxisAlignment.center,
             children: [
-              if (!segment.hideIcon)
-                Icon(segment.icon, size: iconSize, color: iconColor),
+              Icon(segment.icon, size: iconSize, color: iconColor),
               if (!segment.iconOnly) ...[
-                if (!segment.hideIcon) SizedBox(width: height <= 34 ? 5 : 7),
+                SizedBox(width: height <= 34 ? 5 : 7),
                 ConstrainedBox(
                   constraints: BoxConstraints(
                     maxWidth: segment.maxLabelWidth ?? 96,
@@ -8428,10 +11045,90 @@ class _CompactSheetDragHandle extends StatelessWidget {
   }
 }
 
+class _DeleteUndoNoticeContent extends StatelessWidget {
+  const _DeleteUndoNoticeContent({required this.message, required this.onUndo});
+
+  final String message;
+  final VoidCallback onUndo;
+
+  @override
+  Widget build(BuildContext context) {
+    final colorScheme = Theme.of(context).colorScheme;
+    return Center(
+      child: ConstrainedBox(
+        constraints: const BoxConstraints(maxWidth: 420),
+        child: Material(
+          color: Colors.transparent,
+          child: DecoratedBox(
+            decoration: BoxDecoration(
+              color: colorScheme.surfaceContainerHighest,
+              borderRadius: BorderRadius.circular(14),
+              border: Border.all(color: colorScheme.outlineVariant),
+              boxShadow: [
+                BoxShadow(
+                  color: colorScheme.shadow.withValues(alpha: 0.18),
+                  blurRadius: 18,
+                  offset: const Offset(0, 6),
+                ),
+              ],
+            ),
+            child: Padding(
+              padding: const EdgeInsets.fromLTRB(12, 3, 6, 3),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Icon(
+                    Icons.delete_outline,
+                    size: 16,
+                    color: colorScheme.onSurfaceVariant,
+                  ),
+                  const SizedBox(width: 8),
+                  Flexible(
+                    child: Text(
+                      message,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                        color: colorScheme.onSurface,
+                        fontWeight: FontWeight.w700,
+                        height: 1.0,
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  TextButton(
+                    onPressed: onUndo,
+                    style: TextButton.styleFrom(
+                      padding: const EdgeInsets.symmetric(horizontal: 8),
+                      minimumSize: Size.zero,
+                      fixedSize: const Size.fromHeight(26),
+                      tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                      visualDensity: VisualDensity.compact,
+                    ),
+                    child: Text(
+                      'Hoàn tác',
+                      style: Theme.of(context).textTheme.labelMedium?.copyWith(
+                        color: colorScheme.primary,
+                        fontWeight: FontWeight.w700,
+                        height: 1.0,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
 class _DetailPanel extends StatelessWidget {
   const _DetailPanel({
     required this.entry,
     this.compact = false,
+    this.actionBarKey,
     required this.onRestore,
     required this.onOpenUrl,
     required this.onOpenFileLocation,
@@ -8443,6 +11140,7 @@ class _DetailPanel extends StatelessWidget {
 
   final ClipboardEntry? entry;
   final bool compact;
+  final Key? actionBarKey;
   final VoidCallback? onRestore;
   final VoidCallback? onOpenUrl;
   final VoidCallback? onOpenFileLocation;
@@ -8469,6 +11167,15 @@ class _DetailPanel extends StatelessWidget {
       tapTargetSize: MaterialTapTargetSize.shrinkWrap,
       visualDensity: VisualDensity.compact,
     );
+    final deleteActionButtonStyle = FilledButton.styleFrom(
+      fixedSize: const Size.fromHeight(38),
+      minimumSize: const Size(60, 38),
+      padding: const EdgeInsets.symmetric(horizontal: 14),
+      tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+      visualDensity: VisualDensity.compact,
+      backgroundColor: colorScheme.errorContainer,
+      foregroundColor: colorScheme.onErrorContainer,
+    );
     return Material(
       color: colorScheme.surfaceContainerLowest,
       child: Column(
@@ -8484,7 +11191,7 @@ class _DetailPanel extends StatelessWidget {
                   ),
                 ),
                 child: Padding(
-                  padding: const EdgeInsets.fromLTRB(20, 0, 20, 12),
+                  padding: EdgeInsets.fromLTRB(20, 0, 20, compact ? 8 : 12),
                   child: Row(
                     crossAxisAlignment: CrossAxisAlignment.center,
                     children: [
@@ -8523,24 +11230,16 @@ class _DetailPanel extends StatelessWidget {
                         runSpacing: 8,
                         crossAxisAlignment: WrapCrossAlignment.center,
                         children: [
-                          if (compact)
-                            _MotionFeedbackIconButton(
-                              icon: Icons.copy,
-                              tooltip: 'Copy vào clipboard',
+                          Tooltip(
+                            message: 'Copy vào clipboard',
+                            child: _MotionFeedbackButton(
                               onPressed: onRestore,
-                            )
-                          else
-                            Tooltip(
-                              message: 'Copy vào clipboard',
-                              child: _MotionFeedbackButton(
-                                onPressed: onRestore,
-                                icon: Icons.copy,
-                                label: 'Copy',
-                                successLabel: 'Copied',
-                                variant:
-                                    _MotionFeedbackButtonVariant.filledTonal,
-                              ),
+                              icon: Icons.copy,
+                              label: 'Copy',
+                              successLabel: 'Copied',
+                              variant: _MotionFeedbackButtonVariant.filledTonal,
                             ),
+                          ),
                           if (entry.kind == ClipboardKind.url)
                             Tooltip(
                               message: 'Mở URL bằng trình duyệt mặc định',
@@ -8622,6 +11321,7 @@ class _DetailPanel extends StatelessWidget {
           ),
           if (entry != null)
             DecoratedBox(
+              key: actionBarKey,
               decoration: BoxDecoration(
                 color: colorScheme.surfaceContainerLowest,
                 border: Border(
@@ -8680,14 +11380,14 @@ class _DetailPanel extends StatelessWidget {
                                   ),
                           ),
                           const SizedBox(width: 8),
-                          _MotionFeedbackButton(
-                            onPressed: onDelete,
-                            icon: Icons.delete_outline,
-                            label: 'Xóa',
-                            successLabel: 'Đã xóa',
-                            variant: _MotionFeedbackButtonVariant.filledTonal,
-                            destructive: true,
-                            actionDelay: const Duration(milliseconds: 320),
+                          Tooltip(
+                            message: 'Xóa clipboard',
+                            child: FilledButton.tonalIcon(
+                              onPressed: onDelete,
+                              style: deleteActionButtonStyle,
+                              icon: const Icon(Icons.delete_outline),
+                              label: const _ButtonLabel('Xóa'),
+                            ),
                           ),
                           const SizedBox(width: 8),
                           Expanded(
@@ -9913,6 +12613,897 @@ Future<String?> _showPairQrScanner(BuildContext context) {
   );
 }
 
+class _FileTransferPage extends StatelessWidget {
+  const _FileTransferPage({
+    required this.peers,
+    required this.transfers,
+    required this.selectedFiles,
+    required this.selectedPeerIds,
+    required this.statusFilter,
+    required this.draggingFiles,
+    required this.lanSyncEnabled,
+    required this.onPickFiles,
+    required this.onPickFolder,
+    required this.onDropPaths,
+    required this.onDragChanged,
+    required this.onRemoveSelectedFile,
+    required this.onClearSelectedFiles,
+    required this.onTogglePeer,
+    required this.onToggleAllPeers,
+    required this.onSendSelected,
+    required this.onStatusFilterChanged,
+    required this.onClearTransferHistory,
+    required this.onOpenTransferFile,
+    required this.onCancelTransfer,
+  });
+
+  final List<SyncPeer> peers;
+  final List<FileTransferRecord> transfers;
+  final List<FileTransferFile> selectedFiles;
+  final Set<String> selectedPeerIds;
+  final FileTransferStatus? statusFilter;
+  final bool draggingFiles;
+  final bool lanSyncEnabled;
+  final VoidCallback onPickFiles;
+  final VoidCallback onPickFolder;
+  final ValueChanged<List<String>> onDropPaths;
+  final ValueChanged<bool> onDragChanged;
+  final ValueChanged<FileTransferFile> onRemoveSelectedFile;
+  final VoidCallback onClearSelectedFiles;
+  final ValueChanged<String> onTogglePeer;
+  final VoidCallback onToggleAllPeers;
+  final VoidCallback onSendSelected;
+  final ValueChanged<FileTransferStatus?> onStatusFilterChanged;
+  final VoidCallback onClearTransferHistory;
+  final ValueChanged<FileTransferRecord> onOpenTransferFile;
+  final ValueChanged<String> onCancelTransfer;
+
+  @override
+  Widget build(BuildContext context) {
+    final colorScheme = Theme.of(context).colorScheme;
+    final mobile = MediaQuery.sizeOf(context).width < _mobileLayoutBreakpoint;
+    final sortedTransfers = List<FileTransferRecord>.from(transfers)
+      ..sort((a, b) => b.createdAt.compareTo(a.createdAt));
+    final filteredTransfers = statusFilter == null
+        ? sortedTransfers
+        : sortedTransfers
+              .where((transfer) => transfer.status == statusFilter)
+              .toList();
+    final visibleTransfers = filteredTransfers.take(40).toList();
+    final finishedTransferCount = sortedTransfers
+        .where((transfer) => !_isActiveTransferStatus(transfer.status))
+        .length;
+    final selectedOnlinePeers = peers
+        .where((peer) => selectedPeerIds.contains(peer.id))
+        .toList();
+    final totalBytes = selectedFiles.fold<int>(
+      0,
+      (sum, file) => sum + file.size,
+    );
+    final contentSection = _SectionSurface(
+      title: 'Nội dung gửi',
+      trailing: selectedFiles.isEmpty
+          ? null
+          : _MiniChip(
+              label:
+                  '${selectedFiles.length} file - ${_formatBytes(totalBytes)}',
+              timeTone: true,
+            ),
+      child: _FileTransferDropZone(
+        dragging: draggingFiles,
+        selectedFiles: selectedFiles,
+        onPickFiles: onPickFiles,
+        onPickFolder: onPickFolder,
+        onDropPaths: onDropPaths,
+        onDragChanged: onDragChanged,
+        onRemoveSelectedFile: onRemoveSelectedFile,
+        onClearSelectedFiles: onClearSelectedFiles,
+      ),
+    );
+    final deviceSection = _SectionSurface(
+      title: 'Chọn thiết bị nhận',
+      trailing: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          _MiniChip(label: '${peers.length} online', timeTone: true),
+          if (peers.length > 1) ...[
+            const SizedBox(width: 8),
+            TextButton(
+              onPressed: onToggleAllPeers,
+              child: Text(
+                selectedPeerIds.containsAll(peers.map((peer) => peer.id))
+                    ? 'Bỏ chọn'
+                    : 'Tất cả',
+              ),
+            ),
+          ],
+        ],
+      ),
+      child: Column(
+        children: [
+          peers.isEmpty
+              ? const _FileTransferNotice(
+                  icon: Icons.devices_other_outlined,
+                  title: 'Chưa có thiết bị online',
+                  message:
+                      'Mở OpenCB trên thiết bị đã ghép nối trong cùng Wi-Fi/VPN.',
+                )
+              : Column(
+                  children: [
+                    for (final peer in peers) ...[
+                      _FileTransferPeerTile(
+                        peer: peer,
+                        selected: selectedPeerIds.contains(peer.id),
+                        onToggle: () => onTogglePeer(peer.id),
+                      ),
+                      if (peer != peers.last) const SizedBox(height: 8),
+                    ],
+                  ],
+                ),
+          const SizedBox(height: 12),
+          Align(
+            alignment: Alignment.centerRight,
+            child: FilledButton.icon(
+              onPressed:
+                  selectedFiles.isNotEmpty && selectedOnlinePeers.isNotEmpty
+                  ? onSendSelected
+                  : null,
+              icon: const Icon(Icons.send),
+              label: Text(
+                selectedOnlinePeers.length <= 1
+                    ? 'Gửi'
+                    : 'Gửi tới ${selectedOnlinePeers.length} thiết bị',
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+    return ListView(
+      padding: EdgeInsets.fromLTRB(20, 14, 20, mobile ? 104 : 20),
+      children: [
+        if (!lanSyncEnabled) ...[
+          const _FileTransferNotice(
+            icon: Icons.sync_disabled,
+            title: 'Sync LAN đang tắt',
+            message: 'Bật Sync LAN để thấy thiết bị và gửi file trong mạng.',
+          ),
+          const SizedBox(height: 12),
+        ],
+        if (mobile)
+          Column(
+            children: [
+              contentSection,
+              const SizedBox(height: 14),
+              deviceSection,
+            ],
+          )
+        else
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Expanded(flex: 6, child: contentSection),
+              const SizedBox(width: 14),
+              Expanded(flex: 5, child: deviceSection),
+            ],
+          ),
+        const SizedBox(height: 14),
+        _SectionSurface(
+          title: 'Hoạt động gửi nhận',
+          trailing: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              _MiniChip(
+                label: '${filteredTransfers.length} mục',
+                timeTone: true,
+              ),
+              const SizedBox(width: 8),
+              IconButton(
+                tooltip: 'Dọn lịch sử gửi nhận',
+                onPressed: finishedTransferCount > 0
+                    ? onClearTransferHistory
+                    : null,
+                icon: const Icon(Icons.clear_all),
+              ),
+            ],
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              _FileTransferStatusToolbar(
+                selectedStatus: statusFilter,
+                onChanged: onStatusFilterChanged,
+              ),
+              const SizedBox(height: 10),
+              visibleTransfers.isEmpty
+                  ? _FileTransferNotice(
+                      icon: Icons.swap_horiz,
+                      title: statusFilter == null
+                          ? 'Chưa có transfer'
+                          : 'Không có mục ${_fileTransferStatusLabel(statusFilter!).toLowerCase()}',
+                      message: statusFilter == null
+                          ? 'Chọn một thiết bị online để gửi file.'
+                          : 'Đổi bộ lọc để xem hoạt động gửi nhận khác.',
+                    )
+                  : Column(
+                      children: [
+                        for (final transfer in visibleTransfers) ...[
+                          _FileTransferRecordTile(
+                            transfer: transfer,
+                            onOpenFile: _canOpenFileTransferLocally(transfer)
+                                ? () => onOpenTransferFile(transfer)
+                                : null,
+                            onCancel: _isActiveTransferStatus(transfer.status)
+                                ? () => onCancelTransfer(transfer.id)
+                                : null,
+                          ),
+                          if (transfer != visibleTransfers.last)
+                            Divider(color: colorScheme.outlineVariant),
+                        ],
+                      ],
+                    ),
+            ],
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+class _SectionSurface extends StatelessWidget {
+  const _SectionSurface({
+    required this.title,
+    required this.child,
+    this.trailing,
+  });
+
+  final String title;
+  final Widget child;
+  final Widget? trailing;
+
+  @override
+  Widget build(BuildContext context) {
+    final colorScheme = Theme.of(context).colorScheme;
+    return Material(
+      color: colorScheme.surfaceContainerLow,
+      borderRadius: BorderRadius.circular(18),
+      child: Padding(
+        padding: const EdgeInsets.all(14),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Text(
+                  title,
+                  style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                    fontWeight: FontWeight.w800,
+                  ),
+                ),
+                const Spacer(),
+                ?trailing,
+              ],
+            ),
+            const SizedBox(height: 12),
+            child,
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _FileTransferNotice extends StatelessWidget {
+  const _FileTransferNotice({
+    required this.icon,
+    required this.title,
+    required this.message,
+  });
+
+  final IconData icon;
+  final String title;
+  final String message;
+
+  @override
+  Widget build(BuildContext context) {
+    final colorScheme = Theme.of(context).colorScheme;
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        color: colorScheme.surfaceContainerHighest,
+        borderRadius: BorderRadius.circular(14),
+      ),
+      child: Row(
+        children: [
+          Icon(icon, color: colorScheme.primary),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  title,
+                  style: Theme.of(
+                    context,
+                  ).textTheme.titleSmall?.copyWith(fontWeight: FontWeight.w800),
+                ),
+                const SizedBox(height: 2),
+                Text(
+                  message,
+                  style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                    color: colorScheme.onSurfaceVariant,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _FileTransferStatusToolbar extends StatelessWidget {
+  const _FileTransferStatusToolbar({
+    required this.selectedStatus,
+    required this.onChanged,
+  });
+
+  final FileTransferStatus? selectedStatus;
+  final ValueChanged<FileTransferStatus?> onChanged;
+
+  @override
+  Widget build(BuildContext context) {
+    final items = <({FileTransferStatus? status, String label, IconData icon})>[
+      (status: null, label: 'Tất cả', icon: Icons.all_inbox_outlined),
+      (
+        status: FileTransferStatus.completed,
+        label: 'Hoàn tất',
+        icon: Icons.check_circle_outline,
+      ),
+      (
+        status: FileTransferStatus.rejected,
+        label: 'Từ chối',
+        icon: Icons.block_outlined,
+      ),
+      (
+        status: FileTransferStatus.failed,
+        label: 'Lỗi',
+        icon: Icons.error_outline,
+      ),
+    ];
+    return SingleChildScrollView(
+      scrollDirection: Axis.horizontal,
+      child: Row(
+        children: [
+          for (var index = 0; index < items.length; index++) ...[
+            _FileTransferStatusButton(
+              label: items[index].label,
+              icon: items[index].icon,
+              selected: selectedStatus == items[index].status,
+              onPressed: () => onChanged(items[index].status),
+            ),
+            if (index != items.length - 1) const SizedBox(width: 6),
+          ],
+        ],
+      ),
+    );
+  }
+}
+
+class _FileTransferStatusButton extends StatelessWidget {
+  const _FileTransferStatusButton({
+    required this.label,
+    required this.icon,
+    required this.selected,
+    required this.onPressed,
+  });
+
+  final String label;
+  final IconData icon;
+  final bool selected;
+  final VoidCallback onPressed;
+
+  @override
+  Widget build(BuildContext context) {
+    final colorScheme = Theme.of(context).colorScheme;
+    final background = selected
+        ? colorScheme.secondaryContainer
+        : colorScheme.surfaceContainerHighest;
+    final foreground = selected
+        ? colorScheme.onSecondaryContainer
+        : colorScheme.onSurfaceVariant;
+    return Material(
+      color: background,
+      shape: const StadiumBorder(),
+      clipBehavior: Clip.antiAlias,
+      child: InkWell(
+        onTap: onPressed,
+        mouseCursor: SystemMouseCursors.click,
+        child: SizedBox(
+          height: 32,
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 10),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Icon(icon, size: 16, color: foreground),
+                const SizedBox(width: 6),
+                Text(
+                  label,
+                  style: Theme.of(context).textTheme.labelMedium?.copyWith(
+                    color: foreground,
+                    fontWeight: FontWeight.w600,
+                    height: 1,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _FileTransferDropZone extends StatelessWidget {
+  const _FileTransferDropZone({
+    required this.dragging,
+    required this.selectedFiles,
+    required this.onPickFiles,
+    required this.onPickFolder,
+    required this.onDropPaths,
+    required this.onDragChanged,
+    required this.onRemoveSelectedFile,
+    required this.onClearSelectedFiles,
+  });
+
+  final bool dragging;
+  final List<FileTransferFile> selectedFiles;
+  final VoidCallback onPickFiles;
+  final VoidCallback onPickFolder;
+  final ValueChanged<List<String>> onDropPaths;
+  final ValueChanged<bool> onDragChanged;
+  final ValueChanged<FileTransferFile> onRemoveSelectedFile;
+  final VoidCallback onClearSelectedFiles;
+
+  @override
+  Widget build(BuildContext context) {
+    final colorScheme = Theme.of(context).colorScheme;
+    final mobile = MediaQuery.sizeOf(context).width < _mobileLayoutBreakpoint;
+    final useMobileHeader = Platform.isAndroid || mobile;
+    final description = selectedFiles.isEmpty
+        ? Platform.isWindows
+              ? 'Kéo file hoặc folder vào đây, hoặc chọn bên dưới.'
+              : 'Chọn file để gửi.'
+        : Platform.isAndroid
+        ? 'Thêm file khác vào danh sách gửi.'
+        : 'Thêm file hoặc folder khác vào danh sách gửi.';
+    final content = AnimatedContainer(
+      duration: const Duration(milliseconds: 180),
+      curve: Curves.easeOutCubic,
+      width: double.infinity,
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        color: dragging
+            ? colorScheme.secondaryContainer.withValues(alpha: 0.55)
+            : colorScheme.surfaceContainerHighest,
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(
+          color: dragging
+              ? colorScheme.secondary.withValues(alpha: 0.45)
+              : colorScheme.outlineVariant,
+        ),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          if (useMobileHeader)
+            Row(
+              crossAxisAlignment: CrossAxisAlignment.center,
+              children: [
+                OutlinedButton.icon(
+                  onPressed: onPickFiles,
+                  icon: const Icon(Icons.attach_file, size: 18),
+                  label: const Text('Chọn file'),
+                  style: OutlinedButton.styleFrom(
+                    visualDensity: VisualDensity.compact,
+                    padding: const EdgeInsets.symmetric(horizontal: 12),
+                  ),
+                ),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: Text(
+                    description,
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                    style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                      color: colorScheme.onSurfaceVariant,
+                    ),
+                  ),
+                ),
+              ],
+            )
+          else ...[
+            Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Icon(
+                  Icons.file_upload_outlined,
+                  color: colorScheme.onSurfaceVariant,
+                ),
+                const SizedBox(width: 10),
+                Expanded(
+                  child: Text(
+                    description,
+                    style: Theme.of(context).textTheme.bodyMedium?.copyWith(
+                      color: colorScheme.onSurfaceVariant,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 12),
+            Wrap(
+              spacing: 10,
+              runSpacing: 10,
+              children: [
+                OutlinedButton.icon(
+                  onPressed: onPickFiles,
+                  icon: const Icon(Icons.attach_file),
+                  label: const Text('Chọn file'),
+                ),
+                if (!Platform.isAndroid)
+                  OutlinedButton.icon(
+                    onPressed: onPickFolder,
+                    icon: const Icon(Icons.folder_open),
+                    label: const Text('Chọn folder'),
+                  ),
+              ],
+            ),
+          ],
+          if (selectedFiles.isNotEmpty) ...[
+            const SizedBox(height: 12),
+            Divider(color: colorScheme.outlineVariant),
+            const SizedBox(height: 4),
+            _SelectedTransferFilesInlineList(
+              files: selectedFiles,
+              onRemove: onRemoveSelectedFile,
+              onClear: onClearSelectedFiles,
+            ),
+          ],
+        ],
+      ),
+    );
+
+    if (!Platform.isWindows) return content;
+    return DropTarget(
+      onDragEntered: (_) => onDragChanged(true),
+      onDragExited: (_) => onDragChanged(false),
+      onDragDone: (details) {
+        onDragChanged(false);
+        onDropPaths(
+          details.files
+              .map((file) => file.path)
+              .where((path) => path.trim().isNotEmpty)
+              .toList(),
+        );
+      },
+      child: content,
+    );
+  }
+}
+
+class _SelectedTransferFilesInlineList extends StatefulWidget {
+  const _SelectedTransferFilesInlineList({
+    required this.files,
+    required this.onRemove,
+    required this.onClear,
+  });
+
+  final List<FileTransferFile> files;
+  final ValueChanged<FileTransferFile> onRemove;
+  final VoidCallback onClear;
+
+  @override
+  State<_SelectedTransferFilesInlineList> createState() =>
+      _SelectedTransferFilesInlineListState();
+}
+
+class _SelectedTransferFilesInlineListState
+    extends State<_SelectedTransferFilesInlineList> {
+  final ScrollController _scrollController = ScrollController();
+
+  @override
+  void dispose() {
+    _scrollController.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final colorScheme = Theme.of(context).colorScheme;
+    final shouldScroll = widget.files.length > 4;
+    final fileList = Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        for (final file in widget.files)
+          ListTile(
+            dense: true,
+            contentPadding: EdgeInsets.zero,
+            leading: Icon(
+              file.relativePath == null
+                  ? Icons.insert_drive_file_outlined
+                  : Icons.folder_outlined,
+              color: colorScheme.onSurfaceVariant,
+            ),
+            title: Text(
+              file.displayPath,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+            ),
+            subtitle: Text(_formatBytes(file.size)),
+            trailing: IconButton(
+              tooltip: 'Bỏ file',
+              onPressed: () => widget.onRemove(file),
+              icon: const Icon(Icons.close),
+            ),
+          ),
+      ],
+    );
+    return Column(
+      children: [
+        Row(
+          children: [
+            Text(
+              'Đã chọn',
+              style: Theme.of(
+                context,
+              ).textTheme.titleSmall?.copyWith(fontWeight: FontWeight.w800),
+            ),
+            const Spacer(),
+            TextButton.icon(
+              onPressed: widget.onClear,
+              icon: const Icon(Icons.clear_all),
+              label: const Text('Xóa danh sách'),
+            ),
+          ],
+        ),
+        if (shouldScroll)
+          ConstrainedBox(
+            constraints: const BoxConstraints(maxHeight: 224),
+            child: Scrollbar(
+              controller: _scrollController,
+              thumbVisibility: true,
+              child: SingleChildScrollView(
+                controller: _scrollController,
+                child: fileList,
+              ),
+            ),
+          )
+        else
+          fileList,
+      ],
+    );
+  }
+}
+
+class _FileTransferPeerTile extends StatelessWidget {
+  const _FileTransferPeerTile({
+    required this.peer,
+    required this.selected,
+    required this.onToggle,
+  });
+
+  final SyncPeer peer;
+  final bool selected;
+  final VoidCallback onToggle;
+
+  @override
+  Widget build(BuildContext context) {
+    final colorScheme = Theme.of(context).colorScheme;
+    return Material(
+      color: selected
+          ? colorScheme.secondaryContainer.withValues(alpha: 0.62)
+          : colorScheme.surfaceContainerHighest,
+      borderRadius: BorderRadius.circular(14),
+      clipBehavior: Clip.antiAlias,
+      child: ListTile(
+        onTap: onToggle,
+        mouseCursor: SystemMouseCursors.click,
+        leading: CircleAvatar(
+          backgroundColor: colorScheme.surfaceContainerLow,
+          foregroundColor: colorScheme.onSurfaceVariant,
+          child: Icon(selected ? Icons.check : Icons.devices_other),
+        ),
+        title: Text(peer.name, maxLines: 1, overflow: TextOverflow.ellipsis),
+        subtitle: Text(
+          '${peer.host}:${peer.filePort}',
+          maxLines: 1,
+          overflow: TextOverflow.ellipsis,
+        ),
+        trailing: Checkbox(value: selected, onChanged: (_) => onToggle()),
+      ),
+    );
+  }
+}
+
+class _FileTransferRecordTile extends StatelessWidget {
+  const _FileTransferRecordTile({
+    required this.transfer,
+    this.onOpenFile,
+    this.onCancel,
+  });
+
+  final FileTransferRecord transfer;
+  final VoidCallback? onOpenFile;
+  final VoidCallback? onCancel;
+
+  @override
+  Widget build(BuildContext context) {
+    final colorScheme = Theme.of(context).colorScheme;
+    final fileLabel = transfer.files.length == 1
+        ? transfer.files.first.displayPath
+        : '${transfer.files.length} file';
+    final directionLabel = transfer.direction == FileTransferDirection.send
+        ? 'Gửi tới'
+        : 'Nhận từ';
+    final supportingPath = transfer.error ?? transfer.saveDirectory;
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 8),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Icon(
+                transfer.direction == FileTransferDirection.send
+                    ? Icons.file_upload_outlined
+                    : Icons.file_download_outlined,
+                color: colorScheme.primary,
+              ),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      fileLabel,
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: Theme.of(context).textTheme.titleSmall?.copyWith(
+                        fontWeight: FontWeight.w800,
+                      ),
+                    ),
+                    const SizedBox(height: 2),
+                    Text(
+                      '$directionLabel ${transfer.peerName} - ${_formatBytes(transfer.totalBytes)}',
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                        color: colorScheme.onSurfaceVariant,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(width: 8),
+              _FileTransferStatusBadge(status: transfer.status),
+            ],
+          ),
+          const SizedBox(height: 8),
+          ClipRRect(
+            borderRadius: BorderRadius.circular(99),
+            child: LinearProgressIndicator(
+              value: transfer.progress,
+              minHeight: 7,
+              backgroundColor: colorScheme.surfaceContainerHighest,
+            ),
+          ),
+          const SizedBox(height: 5),
+          Row(
+            crossAxisAlignment: CrossAxisAlignment.center,
+            children: [
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      '${_formatBytes(transfer.transferredBytes)} / ${_formatBytes(transfer.totalBytes)}'
+                      '${_isActiveTransferStatus(transfer.status) ? ' • ${_formatTransferSpeed(transfer.speedBytesPerSecond)}' : ''}',
+                      style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                        color: colorScheme.onSurfaceVariant,
+                      ),
+                    ),
+                    if (supportingPath != null) ...[
+                      const SizedBox(height: 3),
+                      Text(
+                        supportingPath,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        textAlign: TextAlign.start,
+                        style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                          color: transfer.error != null
+                              ? colorScheme.error
+                              : colorScheme.onSurfaceVariant,
+                        ),
+                      ),
+                    ],
+                  ],
+                ),
+              ),
+              if (onOpenFile != null || onCancel != null) ...[
+                const SizedBox(width: 8),
+                Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    if (onOpenFile != null)
+                      IconButton(
+                        tooltip: 'Mở file',
+                        onPressed: onOpenFile,
+                        visualDensity: VisualDensity.compact,
+                        icon: const Icon(Icons.open_in_new),
+                      ),
+                    if (onCancel != null)
+                      IconButton(
+                        tooltip: 'Hủy transfer',
+                        onPressed: onCancel,
+                        visualDensity: VisualDensity.compact,
+                        icon: const Icon(Icons.close),
+                      ),
+                  ],
+                ),
+              ],
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _FileTransferStatusBadge extends StatelessWidget {
+  const _FileTransferStatusBadge({required this.status});
+
+  final FileTransferStatus status;
+
+  @override
+  Widget build(BuildContext context) {
+    final colorScheme = Theme.of(context).colorScheme;
+    final (baseColor, contentColor) = switch (status) {
+      FileTransferStatus.failed => (colorScheme.error, colorScheme.error),
+      FileTransferStatus.rejected || FileTransferStatus.canceled => (
+        colorScheme.tertiary,
+        colorScheme.tertiary,
+      ),
+      FileTransferStatus.waiting ||
+      FileTransferStatus.sending ||
+      FileTransferStatus.receiving => (
+        colorScheme.secondary,
+        colorScheme.secondary,
+      ),
+      FileTransferStatus.completed => (
+        colorScheme.primary,
+        colorScheme.primary,
+      ),
+    };
+    return _M3Badge(
+      label: _fileTransferStatusLabel(status),
+      tone: _M3BadgeTone.primary,
+      horizontalPadding: 8,
+      tightText: true,
+      containerColorOverride: Color.alphaBlend(
+        baseColor.withValues(alpha: 0.10),
+        colorScheme.surfaceContainerHigh,
+      ),
+      contentColorOverride: contentColor,
+      iconColorOverride: contentColor,
+      borderColorOverride: baseColor.withValues(alpha: 0.18),
+    );
+  }
+}
+
 class _DevicesPage extends StatelessWidget {
   const _DevicesPage({
     required this.peers,
@@ -9953,6 +13544,7 @@ class _DevicesPage extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final colorScheme = Theme.of(context).colorScheme;
+    final mobile = MediaQuery.sizeOf(context).width < _mobileLayoutBreakpoint;
     final discoveredById = {
       for (final device in discoveredDevices) device.id: device,
     };
@@ -9962,7 +13554,7 @@ class _DevicesPage extends StatelessWidget {
     return Material(
       color: colorScheme.surfaceContainerLowest,
       child: ListView(
-        padding: const EdgeInsets.all(24),
+        padding: EdgeInsets.fromLTRB(24, 24, 24, mobile ? 112 : 24),
         children: [
           LayoutBuilder(
             builder: (context, constraints) {
@@ -10011,7 +13603,7 @@ class _DevicesPage extends StatelessWidget {
                 ],
               );
 
-              if (constraints.maxWidth < 980) {
+              if (constraints.maxWidth < 780) {
                 return Column(
                   children: [
                     leftColumn,
@@ -10071,6 +13663,7 @@ class _PairingActionsCard extends StatelessWidget {
       title: 'Ghép thiết bị mới',
       subtitle: '',
       trailing: actionButtons,
+      inlineTrailingOnCompact: onScanPairQr == null,
       child: const SizedBox.shrink(),
     );
   }
@@ -10169,6 +13762,7 @@ class _SettingsPage extends StatelessWidget {
     required this.sourceSuggestions,
     required this.themeMode,
     required this.themePreset,
+    required this.androidIgnoringBatteryOptimizations,
     required this.onToggleCapture,
     required this.onRetentionLimitChanged,
     required this.onClipboardSettingsChanged,
@@ -10180,6 +13774,8 @@ class _SettingsPage extends StatelessWidget {
     required this.onExportBackup,
     required this.onRestoreBackup,
     required this.onResetClipboardHistory,
+    this.onOpenAndroidNotificationSettings,
+    this.onToggleAndroidBatteryOptimizationBypass,
     this.onOpenDevices,
   });
 
@@ -10189,6 +13785,7 @@ class _SettingsPage extends StatelessWidget {
   final List<String> sourceSuggestions;
   final ThemeMode themeMode;
   final M3ThemePreset themePreset;
+  final bool androidIgnoringBatteryOptimizations;
   final VoidCallback onToggleCapture;
   final ValueChanged<int> onRetentionLimitChanged;
   final ValueChanged<ClipboardSettings> onClipboardSettingsChanged;
@@ -10200,20 +13797,18 @@ class _SettingsPage extends StatelessWidget {
   final VoidCallback onExportBackup;
   final VoidCallback onRestoreBackup;
   final VoidCallback onResetClipboardHistory;
+  final VoidCallback? onOpenAndroidNotificationSettings;
+  final ValueChanged<bool>? onToggleAndroidBatteryOptimizationBypass;
   final VoidCallback? onOpenDevices;
 
   @override
   Widget build(BuildContext context) {
     final colorScheme = Theme.of(context).colorScheme;
+    final mobile = MediaQuery.sizeOf(context).width < _mobileLayoutBreakpoint;
     return Material(
       color: colorScheme.surfaceContainerLowest,
       child: ListView(
-        padding: EdgeInsets.fromLTRB(
-          24,
-          24,
-          24,
-          onOpenDevices != null ? 112 : 24,
-        ),
+        padding: EdgeInsets.fromLTRB(24, 24, 24, mobile ? 112 : 24),
         children: [
           if (onOpenDevices != null) ...[
             _SettingsNavigationRow(
@@ -10235,6 +13830,12 @@ class _SettingsPage extends StatelessWidget {
                 onSettingsChanged: onClipboardSettingsChanged,
                 onAddExcludedSource: onAddExcludedSource,
                 onRemoveExcludedSource: onRemoveExcludedSource,
+                onOpenAndroidNotificationSettings:
+                    onOpenAndroidNotificationSettings,
+                androidIgnoringBatteryOptimizations:
+                    androidIgnoringBatteryOptimizations,
+                onToggleAndroidBatteryOptimizationBypass:
+                    onToggleAndroidBatteryOptimizationBypass,
               );
               Widget buildStorageToolsPanel() => _StorageToolsPanel(
                 storagePath: storagePath,
@@ -10292,6 +13893,7 @@ class _SettingsCard extends StatelessWidget {
     required this.subtitle,
     required this.child,
     this.trailing,
+    this.inlineTrailingOnCompact = false,
   });
 
   final IconData icon;
@@ -10299,6 +13901,7 @@ class _SettingsCard extends StatelessWidget {
   final String subtitle;
   final Widget child;
   final Widget? trailing;
+  final bool inlineTrailingOnCompact;
 
   @override
   Widget build(BuildContext context) {
@@ -10348,7 +13951,7 @@ class _SettingsCard extends StatelessWidget {
                   ],
                 );
                 if (trailing == null) return titleBlock;
-                if (compact) {
+                if (compact && !inlineTrailingOnCompact) {
                   if (trailing is _MiniChip) {
                     return Row(
                       children: [
@@ -10597,17 +14200,17 @@ class _ThemeSettingsPanel extends StatelessWidget {
                 ButtonSegment(
                   value: ThemeMode.light,
                   icon: Icon(Icons.light_mode_outlined),
-                  label: _ButtonLabel('Sáng'),
+                  label: _FittedOneLineLabel('Sáng'),
                 ),
                 ButtonSegment(
                   value: ThemeMode.system,
                   icon: Icon(Icons.brightness_auto_outlined),
-                  label: _ButtonLabel('Hệ thống'),
+                  label: _FittedOneLineLabel('Hệ thống', minWidth: 54),
                 ),
                 ButtonSegment(
                   value: ThemeMode.dark,
                   icon: Icon(Icons.dark_mode_outlined),
-                  label: _ButtonLabel('Tối'),
+                  label: _FittedOneLineLabel('Tối'),
                 ),
               ],
               selected: {themeMode},
@@ -10649,7 +14252,6 @@ class _ThemeSettingsPanel extends StatelessWidget {
                             overflow: TextOverflow.ellipsis,
                           ),
                         ),
-                        tooltip: preset.description,
                         onSelected: (_) => onThemePresetChanged(preset),
                       ),
                     ),
@@ -10673,6 +14275,9 @@ class _ClipboardSettingsPanel extends StatefulWidget {
     required this.onSettingsChanged,
     required this.onAddExcludedSource,
     required this.onRemoveExcludedSource,
+    required this.androidIgnoringBatteryOptimizations,
+    this.onOpenAndroidNotificationSettings,
+    this.onToggleAndroidBatteryOptimizationBypass,
   });
 
   final ClipboardSettings settings;
@@ -10683,6 +14288,9 @@ class _ClipboardSettingsPanel extends StatefulWidget {
   final ValueChanged<ClipboardSettings> onSettingsChanged;
   final ValueChanged<String> onAddExcludedSource;
   final ValueChanged<String> onRemoveExcludedSource;
+  final bool androidIgnoringBatteryOptimizations;
+  final VoidCallback? onOpenAndroidNotificationSettings;
+  final ValueChanged<bool>? onToggleAndroidBatteryOptimizationBypass;
 
   @override
   State<_ClipboardSettingsPanel> createState() =>
@@ -10762,16 +14370,18 @@ class _ClipboardSettingsPanelState extends State<_ClipboardSettingsPanel> {
           ),
         ),
         const SizedBox(height: 8),
-        _SettingsSwitchRow(
-          icon: Icons.image_outlined,
-          title: 'Hình ảnh',
-          subtitle: 'Lưu ảnh clipboard khi app nguồn cung cấp dữ liệu ảnh.',
-          value: widget.settings.captureImages,
-          onChanged: (value) => widget.onSettingsChanged(
-            widget.settings.copyWith(captureImages: value),
+        if (!isAndroid) ...[
+          _SettingsSwitchRow(
+            icon: Icons.image_outlined,
+            title: 'Hình ảnh',
+            subtitle: 'Lưu ảnh clipboard khi app nguồn cung cấp dữ liệu ảnh.',
+            value: widget.settings.captureImages,
+            onChanged: (value) => widget.onSettingsChanged(
+              widget.settings.copyWith(captureImages: value),
+            ),
           ),
-        ),
-        const SizedBox(height: 8),
+          const SizedBox(height: 8),
+        ],
         if (!isAndroid) ...[
           _SettingsSwitchRow(
             icon: Icons.insert_drive_file_outlined,
@@ -10795,26 +14405,28 @@ class _ClipboardSettingsPanelState extends State<_ClipboardSettingsPanel> {
           ),
           const SizedBox(height: 8),
         ],
-        _SettingsSwitchRow(
-          icon: Icons.sync_alt_outlined,
-          title: 'Tự đặt clipboard khi nhận sync',
-          subtitle: 'Đặt luôn vào clipboard hệ thống khi nhận sync.',
-          value: widget.settings.autoSetClipboardFromSync,
-          onChanged: (value) => widget.onSettingsChanged(
-            widget.settings.copyWith(autoSetClipboardFromSync: value),
-          ),
-        ),
-        const SizedBox(height: 8),
         if (isAndroid) ...[
-          _SettingsSwitchRow(
-            icon: Icons.battery_saver_outlined,
-            title: 'Giảm tối ưu pin cho Sync LAN',
-            subtitle: 'Mở cài đặt Android để cho OpenCB chạy nền ổn hơn.',
-            value: widget.settings.androidBackgroundSync,
-            onChanged: (value) => widget.onSettingsChanged(
-              widget.settings.copyWith(androidBackgroundSync: value),
+          if (widget.onToggleAndroidBatteryOptimizationBypass != null) ...[
+            _SettingsSwitchRow(
+              icon: Icons.battery_saver_outlined,
+              title: 'Bỏ qua tối ưu pin',
+              subtitle:
+                  'Tùy chọn thêm nếu Sync LAN chưa ổn định khi app chạy nền.',
+              value: widget.androidIgnoringBatteryOptimizations,
+              onChanged: widget.onToggleAndroidBatteryOptimizationBypass!,
             ),
-          ),
+            const SizedBox(height: 8),
+          ],
+          if (widget.onOpenAndroidNotificationSettings != null) ...[
+            Align(
+              alignment: Alignment.centerLeft,
+              child: OutlinedButton.icon(
+                onPressed: widget.onOpenAndroidNotificationSettings,
+                icon: const Icon(Icons.notifications_off_outlined),
+                label: const _ButtonLabel('Ẩn thông báo chạy nền'),
+              ),
+            ),
+          ],
           const SizedBox(height: 8),
         ],
         if (!isAndroid) ...[
@@ -11354,6 +14966,37 @@ class _ButtonLabel extends StatelessWidget {
   }
 }
 
+class _FittedOneLineLabel extends StatelessWidget {
+  const _FittedOneLineLabel(this.text, {this.minWidth = 42});
+
+  final String text;
+  final double minWidth;
+
+  @override
+  Widget build(BuildContext context) {
+    return Transform.translate(
+      offset: const Offset(0, -1),
+      child: SizedBox(
+        width: minWidth,
+        height: 16,
+        child: FittedBox(
+          fit: BoxFit.scaleDown,
+          alignment: Alignment.center,
+          child: Text(
+            text,
+            maxLines: 1,
+            overflow: TextOverflow.visible,
+            softWrap: false,
+            textHeightBehavior: const TextHeightBehavior(
+              leadingDistribution: TextLeadingDistribution.even,
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+}
+
 enum _MotionFeedbackButtonVariant { filled, filledTonal, outlined }
 
 class _AnimatedFeedbackLabel extends StatelessWidget {
@@ -11456,8 +15099,6 @@ class _MotionFeedbackButton extends StatefulWidget {
     required this.onPressed,
     this.successLabel = 'Xong',
     this.variant = _MotionFeedbackButtonVariant.outlined,
-    this.destructive = false,
-    this.actionDelay = Duration.zero,
   });
 
   final IconData icon;
@@ -11465,8 +15106,6 @@ class _MotionFeedbackButton extends StatefulWidget {
   final FutureOr<void> Function()? onPressed;
   final String successLabel;
   final _MotionFeedbackButtonVariant variant;
-  final bool destructive;
-  final Duration actionDelay;
 
   @override
   State<_MotionFeedbackButton> createState() => _MotionFeedbackButtonState();
@@ -11492,9 +15131,6 @@ class _MotionFeedbackButtonState extends State<_MotionFeedbackButton> {
       _showFeedback = true;
     });
     try {
-      if (widget.actionDelay > Duration.zero) {
-        await Future<void>.delayed(widget.actionDelay);
-      }
       await action();
     } finally {
       if (mounted) _scheduleReset();
@@ -12141,10 +15777,15 @@ class _DeviceRow extends StatelessWidget {
   Widget build(BuildContext context) {
     final colorScheme = Theme.of(context).colorScheme;
     final hasError = peer.lastError != null;
+    final lastSeenAge = discoveredDevice == null
+        ? null
+        : DateTime.now().difference(discoveredDevice!.lastSeenAt);
     final online =
-        discoveredDevice != null &&
-        DateTime.now().difference(discoveredDevice!.lastSeenAt) <=
-            const Duration(seconds: 18);
+        lastSeenAge != null && lastSeenAge <= _discoveredDeviceOnlineWindow;
+    final recentlySeen =
+        !online &&
+        lastSeenAge != null &&
+        lastSeenAge <= _discoveredDeviceCacheWindow;
     Widget deviceActionButton({
       required String tooltip,
       required VoidCallback onPressed,
@@ -12200,33 +15841,34 @@ class _DeviceRow extends StatelessWidget {
           ? 'Lỗi'
           : online
           ? 'Online'
+          : recentlySeen
+          ? 'Vừa thấy'
           : 'Offline',
       tone: _M3BadgeTone.surface,
       icon: hasError
           ? Icons.error_outline
           : online
           ? Icons.check_circle_outline
+          : recentlySeen
+          ? Icons.schedule_outlined
           : Icons.cloud_off_outlined,
       containerColorOverride: hasError
           ? Color.alphaBlend(
               colorScheme.error.withValues(alpha: 0.12),
               colorScheme.surfaceContainerHigh,
             )
-          : online
-          ? Color.alphaBlend(
-              colorScheme.primary.withValues(alpha: 0.12),
-              colorScheme.surfaceContainerHigh,
-            )
+          : online || recentlySeen
+          ? colorScheme.surfaceContainerHigh
           : null,
       contentColorOverride: hasError
           ? colorScheme.error
-          : online
-          ? colorScheme.primary
+          : online || recentlySeen
+          ? colorScheme.onSurfaceVariant
           : null,
       iconColorOverride: hasError
           ? colorScheme.error
-          : online
-          ? colorScheme.primary
+          : online || recentlySeen
+          ? colorScheme.onSurfaceVariant
           : null,
     );
     return Container(
@@ -12256,6 +15898,8 @@ class _DeviceRow extends StatelessWidget {
                           ? Icons.sync_problem
                           : online
                           ? Icons.wifi_tethering
+                          : recentlySeen
+                          ? Icons.schedule_outlined
                           : Icons.verified_user_outlined,
                       size: 22,
                       color: hasError
@@ -12328,6 +15972,8 @@ class _DeviceRow extends StatelessWidget {
                                 ? Icons.sync_problem
                                 : online
                                 ? Icons.wifi_tethering
+                                : recentlySeen
+                                ? Icons.schedule_outlined
                                 : Icons.verified_user_outlined,
                             size: 22,
                             color: hasError
@@ -12592,6 +16238,10 @@ Future<File> _clipboardSettingsFile() async {
   return _opencbDataFile('clipboard_settings.json');
 }
 
+Future<File> _fileTransfersFile() async {
+  return _opencbDataFile('file_transfers.json');
+}
+
 Future<File> _themeFile() async {
   return _opencbDataFile('theme.json');
 }
@@ -12623,6 +16273,102 @@ String _databaseFilePathPreview() {
       Platform.environment['HOME'] ??
       Directory.current.path;
   return '$base${Platform.pathSeparator}OpenCB${Platform.pathSeparator}opencb.sqlite3';
+}
+
+String _fileNameFromPath(String path) {
+  final normalized = path.replaceAll('\\', Platform.pathSeparator);
+  final parts = normalized.split(Platform.pathSeparator);
+  final name = parts.isEmpty ? path : parts.last;
+  return name.trim().isEmpty ? 'file' : name;
+}
+
+String _safeFileName(String value) {
+  final sanitized = value
+      .replaceAll(RegExp(r'[<>:"/\\|?*\x00-\x1F]'), '_')
+      .trim();
+  return sanitized.isEmpty ? 'file' : sanitized;
+}
+
+String _safeRelativeFilePath(String value) {
+  final parts = value
+      .replaceAll('\\', '/')
+      .split('/')
+      .map((part) => part.trim())
+      .where((part) => part.isNotEmpty && part != '.' && part != '..')
+      .map(_safeFileName)
+      .toList();
+  if (parts.isEmpty) return _safeFileName(value);
+  return parts.join('/');
+}
+
+String _formatBytes(int bytes) {
+  if (bytes < 1024) return '$bytes B';
+  const units = ['KB', 'MB', 'GB', 'TB'];
+  var value = bytes / 1024;
+  var unitIndex = 0;
+  while (value >= 1024 && unitIndex < units.length - 1) {
+    value /= 1024;
+    unitIndex += 1;
+  }
+  final decimals = value >= 100
+      ? 0
+      : value >= 10
+      ? 1
+      : 2;
+  return '${value.toStringAsFixed(decimals)} ${units[unitIndex]}';
+}
+
+String _formatTransferSpeed(int bytesPerSecond) {
+  if (bytesPerSecond <= 0) return 'Đang đo';
+  return '${_formatBytes(bytesPerSecond)}/s';
+}
+
+String _generateTransferId() {
+  final now = DateTime.now().microsecondsSinceEpoch;
+  final suffix = math.Random().nextInt(0xFFFFFF).toRadixString(16);
+  return 'transfer-$now-$suffix';
+}
+
+String _fileTransferStatusLabel(FileTransferStatus status) {
+  return switch (status) {
+    FileTransferStatus.waiting => 'Đang chờ xác nhận',
+    FileTransferStatus.sending => 'Đang gửi',
+    FileTransferStatus.receiving => 'Đang nhận',
+    FileTransferStatus.completed => 'Hoàn tất',
+    FileTransferStatus.rejected => 'Từ chối',
+    FileTransferStatus.failed => 'Lỗi',
+    FileTransferStatus.canceled => 'Đã hủy',
+  };
+}
+
+bool _isActiveTransferStatus(FileTransferStatus status) {
+  return status == FileTransferStatus.waiting ||
+      status == FileTransferStatus.sending ||
+      status == FileTransferStatus.receiving;
+}
+
+bool _canOpenFileTransferLocally(FileTransferRecord transfer) {
+  if (!(Platform.isWindows || Platform.isMacOS || Platform.isLinux)) {
+    return false;
+  }
+  if (transfer.direction != FileTransferDirection.receive ||
+      transfer.status != FileTransferStatus.completed ||
+      transfer.files.length != 1) {
+    return false;
+  }
+  final file = transfer.files.first;
+  final savedPath = file.savedPath?.trim();
+  if (savedPath != null &&
+      savedPath.isNotEmpty &&
+      File(savedPath).existsSync()) {
+    return true;
+  }
+  final saveDirectory = transfer.saveDirectory?.trim();
+  if (saveDirectory == null || saveDirectory.isEmpty) return false;
+  final candidate = File(
+    '$saveDirectory${Platform.pathSeparator}${_safeRelativeFilePath(file.displayPath).replaceAll('/', Platform.pathSeparator)}',
+  );
+  return candidate.existsSync();
 }
 
 ClipboardKind _kindFromName(String name) {
@@ -12986,6 +16732,7 @@ String _buildPairPayload(
       'name': identity.deviceName,
       'host': host,
       'port': '$port',
+      'filePort': '$_defaultFileTransferPort',
       'code': identity.pairCode,
     },
   ).toString();
@@ -13069,6 +16816,21 @@ String? _classCDirectedBroadcast(String address) {
   return '${numbers[0]}.${numbers[1]}.${numbers[2]}.255';
 }
 
+List<String> _classCSubnetTargets(String address) {
+  final parts = address.split('.');
+  if (parts.length != 4) return const [];
+  final numbers = parts.map(int.tryParse).toList();
+  if (numbers.any((part) => part == null || part < 0 || part > 255)) {
+    return const [];
+  }
+  final self = numbers[3]!;
+  final prefix = '${numbers[0]}.${numbers[1]}.${numbers[2]}';
+  return [
+    for (var host = 1; host <= 254; host += 1)
+      if (host != self) '$prefix.$host',
+  ];
+}
+
 bool _isUsableLanIpv4(String address) {
   return address != '0.0.0.0' &&
       !address.startsWith('127.') &&
@@ -13135,6 +16897,10 @@ SyncPeer? _syncPeerFromPairMap(Map<String, dynamic> data) {
   final port =
       parsedEndpoint?.$2 ??
       (portValue is int ? portValue : int.tryParse('$portValue'));
+  final filePortValue = data['filePort'];
+  final filePort = filePortValue is int
+      ? filePortValue
+      : int.tryParse('$filePortValue');
   final resolvedHost = parsedEndpoint?.$1 ?? host;
   final pairCode = (data['code'] ?? data['pairCode'])
       ?.toString()
@@ -13161,6 +16927,9 @@ SyncPeer? _syncPeerFromPairMap(Map<String, dynamic> data) {
     name: name == null || name.isEmpty ? 'Thiết bị LAN' : name,
     host: resolvedHost,
     port: port,
+    filePort: filePort == null || filePort <= 0 || filePort > 65535
+        ? _defaultFileTransferPort
+        : filePort,
     pairCode: pairCode,
   );
 }
@@ -13841,5 +17610,9 @@ typedef _NativeBlobFree = ffi.Void Function(ffi.Pointer<ffi.Uint8>, ffi.Size);
 typedef _DartBlobFree = void Function(ffi.Pointer<ffi.Uint8>, int);
 
 const int _defaultSyncPort = 47873;
+const int _defaultFileTransferPort = 47874;
 const String _syncProtocol = 'opencb_lan_text_v1';
 const String _discoveryProtocol = 'opencb_lan_discovery_v1';
+const String _fileTransferProtocol = 'opencb_lan_file_v1';
+const int _androidFileWriteBatchBytes = 4 * 1024 * 1024;
+const int _androidContentReadChunkBytes = 1024 * 1024;
