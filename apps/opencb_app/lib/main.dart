@@ -10494,6 +10494,27 @@ class _ConnectedButtonGroupItem extends StatelessWidget {
         ? colorScheme.onSecondary
         : segment.iconColor ?? foregroundColor;
     final borderRadius = _borderRadius;
+    Widget labelWidget() {
+      return ConstrainedBox(
+        constraints: BoxConstraints(maxWidth: segment.maxLabelWidth ?? 96),
+        child: AnimatedDefaultTextStyle(
+          duration: const Duration(milliseconds: 160),
+          curve: Curves.easeOutCubic,
+          style:
+              Theme.of(context).textTheme.labelLarge?.copyWith(
+                color: foregroundColor,
+                fontWeight: segment.selected ? FontWeight.w700 : null,
+              ) ??
+              TextStyle(color: foregroundColor),
+          child: Text(
+            segment.label,
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+          ),
+        ),
+      );
+    }
+
     final button = Material(
       color: Colors.transparent,
       borderRadius: borderRadius,
@@ -10528,26 +10549,7 @@ class _ConnectedButtonGroupItem extends StatelessWidget {
               Icon(segment.icon, size: iconSize, color: iconColor),
               if (!segment.iconOnly) ...[
                 SizedBox(width: height <= 34 ? 5 : 7),
-                ConstrainedBox(
-                  constraints: BoxConstraints(
-                    maxWidth: segment.maxLabelWidth ?? 96,
-                  ),
-                  child: AnimatedDefaultTextStyle(
-                    duration: const Duration(milliseconds: 160),
-                    curve: Curves.easeOutCubic,
-                    style:
-                        Theme.of(context).textTheme.labelLarge?.copyWith(
-                          color: foregroundColor,
-                          fontWeight: segment.selected ? FontWeight.w700 : null,
-                        ) ??
-                        TextStyle(color: foregroundColor),
-                    child: Text(
-                      segment.label,
-                      maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                    ),
-                  ),
-                ),
+                if (expanded) Flexible(child: labelWidget()) else labelWidget(),
               ],
             ],
           ),
