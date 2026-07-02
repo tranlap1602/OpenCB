@@ -1852,6 +1852,7 @@ class _ClipboardHomePageState extends State<ClipboardHomePage>
     String? transferId,
     bool showFileOfferActions = false,
     bool silent = false,
+    int? autoCancelAfterMs,
   }) async {
     if (!Platform.isAndroid || _appInForeground) return false;
     try {
@@ -1863,6 +1864,9 @@ class _ClipboardHomePageState extends State<ClipboardHomePage>
               ...?(transferId == null ? null : {'transferId': transferId}),
               'showFileOfferActions': showFileOfferActions,
               'silent': silent,
+              ...?(autoCancelAfterMs == null
+                  ? null
+                  : {'autoCancelAfterMs': autoCancelAfterMs}),
             },
           ) ??
           false;
@@ -3688,17 +3692,14 @@ class _ClipboardHomePageState extends State<ClipboardHomePage>
           _selectedTransferFiles,
           files,
         );
-        _section = 'Gửi file';
-        _selectedIndex = 0;
-        _mobileSearchOpen = false;
+        _openFileTransferSectionForStagedFiles();
       });
-      _syncMobilePageToSection('Gửi file');
     } else {
       _selectedTransferFiles = _mergeTransferFiles(
         _selectedTransferFiles,
         files,
       );
-      _section = 'Gửi file';
+      _openFileTransferSectionForStagedFiles();
     }
   }
 
@@ -4511,6 +4512,7 @@ class _ClipboardHomePageState extends State<ClipboardHomePage>
         title: 'Đã gửi clipboard',
         body: '',
         silent: true,
+        autoCancelAfterMs: 1800,
       );
     }
   }
@@ -6072,6 +6074,17 @@ class _ClipboardHomePageState extends State<ClipboardHomePage>
     );
   }
 
+  void _openFileTransferSectionForStagedFiles() {
+    _section = 'Gửi file';
+    _selectedIndex = 0;
+    _mobileSearchOpen = false;
+    _fileTransferStatusFilter = null;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      _syncMobilePageToSection('Gửi file');
+    });
+  }
+
   void _selectSection(String section, {bool syncMobilePage = true}) {
     setState(() {
       _section = section;
@@ -6946,12 +6959,21 @@ class _Sidebar extends StatelessWidget {
                   for (final item in items)
                     NavigationRailDestination(
                       icon: menuCursor(
-                        Tooltip(message: item.label, child: Icon(item.icon)),
+                        Tooltip(
+                          message: item.label,
+                          child: _OpenCbMenuIcon(
+                            label: item.label,
+                            icon: item.icon,
+                          ),
+                        ),
                       ),
                       selectedIcon: menuCursor(
                         Tooltip(
                           message: item.label,
-                          child: Icon(item.selectedIcon),
+                          child: _OpenCbMenuIcon(
+                            label: item.label,
+                            icon: item.selectedIcon,
+                          ),
                         ),
                       ),
                       label: menuCursor(Text(item.label)),
@@ -7384,18 +7406,6 @@ class _MobileFloatingToolbarItem extends StatelessWidget {
         child: ScaleTransition(scale: curved, child: child),
       );
     }
-    if (label == 'Gửi file') {
-      return FadeTransition(
-        opacity: animation,
-        child: SlideTransition(
-          position: Tween<Offset>(
-            begin: Offset(selected ? -0.24 : 0.18, 0),
-            end: Offset.zero,
-          ).animate(curved),
-          child: ScaleTransition(scale: curved, child: child),
-        ),
-      );
-    }
     return FadeTransition(
       opacity: animation,
       child: SlideTransition(
@@ -7434,7 +7444,9 @@ class _MobileFloatingToolbarItem extends StatelessWidget {
                 mainAxisAlignment: MainAxisAlignment.center,
                 children: [
                   AnimatedSwitcher(
-                    duration: const Duration(milliseconds: 260),
+                    duration: Duration(
+                      milliseconds: label == 'Gửi file' ? 320 : 260,
+                    ),
                     switchInCurve: Curves.easeOutCubic,
                     switchOutCurve: Curves.easeInCubic,
                     transitionBuilder: _buildIconTransition,
@@ -7447,26 +7459,14 @@ class _MobileFloatingToolbarItem extends StatelessWidget {
                             : selected && label == 'Lịch sử'
                             ? -1
                             : selected && label == 'Gửi file'
-                            ? 1
+                            ? 1.5
                             : 0,
                       ),
-                      duration: const Duration(milliseconds: 620),
+                      duration: Duration(
+                        milliseconds: label == 'Gửi file' ? 820 : 620,
+                      ),
                       curve: Curves.easeOutCubic,
                       builder: (context, value, child) {
-                        if (selected && label == 'Gửi file') {
-                          final pulse = math.sin(value * math.pi);
-                          return Transform.translate(
-                            offset: Offset(
-                              math.sin(value * math.pi * 2) * 2.8,
-                              0,
-                            ),
-                            child: Transform.scale(
-                              scaleX: 1 + pulse * 0.16,
-                              scaleY: 1 - pulse * 0.04,
-                              child: child,
-                            ),
-                          );
-                        }
                         return Transform.rotate(
                           angle: value * math.pi * 2,
                           child: child,
@@ -7476,8 +7476,9 @@ class _MobileFloatingToolbarItem extends StatelessWidget {
                         scale: selected ? 1.08 : 1,
                         duration: const Duration(milliseconds: 240),
                         curve: Curves.easeOutBack,
-                        child: Icon(
-                          selected ? selectedIcon : icon,
+                        child: _OpenCbMenuIcon(
+                          label: label,
+                          icon: selected ? selectedIcon : icon,
                           size: iconSize,
                           color: foreground,
                         ),
@@ -7528,6 +7529,343 @@ class _MobileFloatingToolbarItem extends StatelessWidget {
   }
 }
 
+class _OpenCbMenuIcon extends StatelessWidget {
+  const _OpenCbMenuIcon({
+    required this.label,
+    required this.icon,
+    this.size,
+    this.color,
+  });
+
+  final String label;
+  final IconData icon;
+  final double? size;
+  final Color? color;
+
+  @override
+  Widget build(BuildContext context) {
+    if (label != 'Gửi file') {
+      return Icon(icon, size: size, color: color);
+    }
+    final iconTheme = IconTheme.of(context);
+    return _OpenCbFileShareIcon(
+      size: size ?? iconTheme.size ?? 24,
+      color: color ?? iconTheme.color ?? Colors.black,
+    );
+  }
+}
+
+class _OpenCbFileShareIcon extends StatelessWidget {
+  const _OpenCbFileShareIcon({required this.size, required this.color});
+
+  final double size;
+  final Color color;
+
+  @override
+  Widget build(BuildContext context) {
+    return SizedBox.square(
+      dimension: size,
+      child: CustomPaint(painter: _OpenCbFileShareIconPainter(color)),
+    );
+  }
+}
+
+class _OpenCbFileShareIconPainter extends CustomPainter {
+  const _OpenCbFileShareIconPainter(this.color);
+
+  final Color color;
+
+  static final Path _topPath = Path()
+    ..moveTo(423.960938, 255.066406)
+    ..cubicTo(
+      415.589844,
+      255.066406,
+      408.421969,
+      248.753906,
+      407.542969,
+      240.296875,
+    )
+    ..cubicTo(
+      399.550781,
+      162.804688,
+      334.394531,
+      104.371094,
+      256.003906,
+      104.371094,
+    )
+    ..cubicTo(
+      192.488281,
+      104.371094,
+      136.726562,
+      143.019531,
+      114.167969,
+      200.445312,
+    )
+    ..lineTo(214.425781, 200.445312)
+    ..lineTo(206.3125, 192.367188)
+    ..cubicTo(
+      203.5625,
+      189.636719,
+      202.015625,
+      185.917969,
+      202.015625,
+      182.042969,
+    )
+    ..cubicTo(
+      202.015625,
+      178.164062,
+      203.5625,
+      174.445312,
+      206.3125,
+      171.714844,
+    )
+    ..cubicTo(
+      212.058594,
+      166.007812,
+      221.332031,
+      166.007812,
+      227.078125,
+      171.714844,
+    )
+    ..lineTo(262.066406, 206.535156)
+    ..cubicTo(
+      264.820312,
+      209.269531,
+      266.367188,
+      212.988281,
+      266.367188,
+      216.867188,
+    )
+    ..cubicTo(
+      266.367188,
+      220.746094,
+      264.820312,
+      224.46875,
+      262.066406,
+      227.199219,
+    )
+    ..lineTo(227.078125, 262.023438)
+    ..cubicTo(
+      221.335938,
+      267.726562,
+      212.066406,
+      267.726562,
+      206.324219,
+      262.023438,
+    )
+    ..cubicTo(
+      203.570312,
+      259.289062,
+      202.023438,
+      255.566406,
+      202.023438,
+      251.6875,
+    )
+    ..cubicTo(
+      202.023438,
+      247.808594,
+      203.570312,
+      244.089844,
+      206.324219,
+      241.355469,
+    )
+    ..lineTo(214.378906, 233.339844)
+    ..lineTo(92.957031, 233.339844)
+    ..cubicTo(87.894531, 233.339844, 82.371094, 230.648438, 79.234375, 226.6875)
+    ..cubicTo(
+      76.089844,
+      222.707031,
+      74.78125,
+      216.675781,
+      75.992188,
+      211.773438,
+    )
+    ..cubicTo(96.40625, 129.179688, 170.4375, 71.496094, 256.003906, 71.496094)
+    ..cubicTo(
+      351.394531,
+      71.496094,
+      430.675781,
+      142.628906,
+      440.417969,
+      236.941406,
+    )
+    ..cubicTo(
+      441.347656,
+      245.96875,
+      434.742188,
+      254.050781,
+      425.664062,
+      254.976562,
+    )
+    ..cubicTo(
+      425.097656,
+      255.035156,
+      424.53125,
+      255.066406,
+      423.960938,
+      255.066406,
+    )
+    ..close();
+
+  static final Path _bottomPath = Path()
+    ..moveTo(86.339844, 256.816406)
+    ..cubicTo(
+      95.527344,
+      255.996094,
+      103.523438,
+      262.488281,
+      104.453125,
+      271.515625,
+    )
+    ..cubicTo(
+      104.730469,
+      274.28125,
+      105.089844,
+      277.027344,
+      105.519531,
+      279.738281,
+    )
+    ..cubicTo(
+      117.214844,
+      353.84375,
+      180.507812,
+      407.609375,
+      256.003906,
+      407.609375,
+    )
+    ..cubicTo(
+      319.546875,
+      407.609375,
+      375.324219,
+      368.953125,
+      397.867188,
+      311.476562,
+    )
+    ..lineTo(297.519531, 311.476562)
+    ..lineTo(305.695312, 319.613281)
+    ..cubicTo(
+      308.449219,
+      322.347656,
+      309.996094,
+      326.066406,
+      309.996094,
+      329.945312,
+    )
+    ..cubicTo(
+      309.996094,
+      333.824219,
+      308.449219,
+      337.542969,
+      305.695312,
+      340.28125,
+    )
+    ..cubicTo(
+      299.953125,
+      345.984375,
+      290.683594,
+      345.984375,
+      284.941406,
+      340.28125,
+    )
+    ..lineTo(249.945312, 305.453125)
+    ..cubicTo(
+      247.195312,
+      302.71875,
+      245.644531,
+      298.996094,
+      245.644531,
+      295.117188,
+    )
+    ..cubicTo(
+      245.644531,
+      291.238281,
+      247.195312,
+      287.519531,
+      249.945312,
+      284.785156,
+    )
+    ..lineTo(284.933594, 249.960938)
+    ..cubicTo(
+      290.679688,
+      244.257812,
+      299.953125,
+      244.257812,
+      305.699219,
+      249.960938,
+    )
+    ..cubicTo(308.453125, 252.695312, 310, 256.414062, 310, 260.289062)
+    ..cubicTo(310, 264.167969, 308.453125, 267.886719, 305.699219, 270.621094)
+    ..lineTo(297.703125, 278.582031)
+    ..lineTo(419.078125, 278.582031)
+    ..cubicTo(
+      424.140625,
+      278.582031,
+      429.671875,
+      281.273438,
+      432.800781,
+      285.234375,
+    )
+    ..cubicTo(
+      435.945312,
+      289.214844,
+      437.253906,
+      295.207031,
+      436.042969,
+      300.128906,
+    )
+    ..cubicTo(
+      415.652344,
+      382.777344,
+      341.621094,
+      440.503906,
+      256.003906,
+      440.503906,
+    )
+    ..cubicTo(
+      164.132812,
+      440.503906,
+      87.121094,
+      375.035156,
+      72.882812,
+      284.84375,
+    )
+    ..cubicTo(
+      72.359375,
+      281.519531,
+      71.925781,
+      278.179688,
+      71.582031,
+      274.832031,
+    )
+    ..cubicTo(
+      70.660156,
+      265.808594,
+      77.273438,
+      257.742188,
+      86.339844,
+      256.816406,
+    )
+    ..close();
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final paint = Paint()
+      ..color = color
+      ..style = PaintingStyle.fill
+      ..isAntiAlias = true;
+    canvas.save();
+    canvas.scale(size.width / 512, size.height / 512);
+    canvas.drawPath(_topPath, paint);
+    canvas.drawPath(_bottomPath, paint);
+    canvas.restore();
+  }
+
+  @override
+  bool shouldRepaint(covariant _OpenCbFileShareIconPainter oldDelegate) {
+    return oldDelegate.color != color;
+  }
+}
+
 class _CompactSidebarDestination extends StatelessWidget {
   const _CompactSidebarDestination({
     required this.icon,
@@ -7568,7 +7906,13 @@ class _CompactSidebarDestination extends StatelessWidget {
             child: SizedBox(
               width: 56,
               height: 44,
-              child: Icon(selected ? selectedIcon : icon, color: foreground),
+              child: Center(
+                child: _OpenCbMenuIcon(
+                  label: label,
+                  icon: selected ? selectedIcon : icon,
+                  color: foreground,
+                ),
+              ),
             ),
           ),
         ),

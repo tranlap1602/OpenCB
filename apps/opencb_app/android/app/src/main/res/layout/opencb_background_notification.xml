@@ -1,10 +1,10 @@
 <?xml version="1.0" encoding="utf-8"?>
 <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
     android:layout_width="match_parent"
-    android:layout_height="30dp"
+    android:layout_height="24dp"
     android:gravity="center_vertical"
     android:orientation="horizontal"
-    android:paddingStart="8dp"
+    android:paddingStart="0dp"
     android:paddingEnd="4dp">
 
     <TextView
@@ -16,7 +16,7 @@
         android:fontFamily="sans"
         android:maxLines="1"
         android:text="OpenCB đang chạy nền"
-        android:textColor="#F4F7F6"
+        android:textColor="#DCE5E1"
         android:textSize="14sp"
         android:textStyle="bold" />
 
@@ -29,7 +29,7 @@
         android:paddingStart="8dp"
         android:paddingEnd="8dp"
         android:text="Gửi clipboard"
-        android:textColor="#FFFFFF"
+        android:textColor="#DCE5E1"
         android:textSize="14sp"
         android:textStyle="bold" />
 </LinearLayout>

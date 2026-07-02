@@ -10,6 +10,8 @@ import android.content.Context
 import android.content.res.Configuration
 import android.graphics.drawable.ColorDrawable
 import android.graphics.Color
+import android.graphics.Bitmap
+import android.graphics.Canvas
 import android.content.Intent
 import android.app.Activity
 import android.app.NotificationChannel
@@ -122,6 +124,29 @@ object OpenCbNotificationBridge {
     }
 }
 
+object OpenCbSharedFileBridge {
+    var platformChannel: MethodChannel? = null
+    private val mainHandler = Handler(Looper.getMainLooper())
+    private val pendingFiles = mutableListOf<Map<String, Any>>()
+
+    @Synchronized
+    fun push(files: List<Map<String, Any>>) {
+        if (files.isEmpty()) return
+        pendingFiles.addAll(files)
+        val snapshot = files.toList()
+        mainHandler.post {
+            platformChannel?.invokeMethod("sharedFiles", snapshot)
+        }
+    }
+
+    @Synchronized
+    fun consume(): List<Map<String, Any>> {
+        val files = pendingFiles.toList()
+        pendingFiles.clear()
+        return files
+    }
+}
+
 class OpenCbApplication : FlutterApplication() {
     companion object {
         const val engineId = "opencb_background_engine"
@@ -148,6 +173,20 @@ class OpenCbNotificationActionReceiver : BroadcastReceiver() {
             return
         }
         OpenCbNotificationBridge.sendFileOfferAction(context, intent)
+    }
+}
+
+private fun Context.appIconBitmap(sizeDp: Int): Bitmap? {
+    return try {
+        val sizePx = (sizeDp * resources.displayMetrics.density).toInt().coerceAtLeast(1)
+        val drawable = applicationInfo.loadIcon(packageManager)
+        val bitmap = Bitmap.createBitmap(sizePx, sizePx, Bitmap.Config.ARGB_8888)
+        val canvas = Canvas(bitmap)
+        drawable.setBounds(0, 0, canvas.width, canvas.height)
+        drawable.draw(canvas)
+        bitmap
+    } catch (_: Exception) {
+        null
     }
 }
 
@@ -354,7 +393,8 @@ class OpenCbBackgroundService : Service() {
             android.app.Notification.Builder(this)
         }
         val notification = builder
-            .setSmallIcon(applicationInfo.icon)
+            .setSmallIcon(R.drawable.ic_stat_opencb)
+            .setLargeIcon(appIconBitmap(36))
             .setContentTitle("Clipboard mới")
             .setContentText(preview)
             .setContentIntent(contentIntent)
@@ -383,14 +423,14 @@ class OpenCbBackgroundService : Service() {
         cleanupLegacyBackgroundChannels(manager)
         val channel = NotificationChannel(
             channelId,
-            "OpenCB Sync LAN",
+            "OpenCB chạy nền",
             NotificationManager.IMPORTANCE_MIN,
         ).apply {
             description = "Giữ OpenCB online và cung cấp nút gửi clipboard"
             setShowBadge(false)
             enableVibration(false)
             setSound(null, null)
-            lockscreenVisibility = android.app.Notification.VISIBILITY_PRIVATE
+            lockscreenVisibility = android.app.Notification.VISIBILITY_SECRET
         }
         manager.createNotificationChannel(channel)
     }
@@ -426,7 +466,7 @@ class OpenCbBackgroundService : Service() {
             android.app.Notification.Builder(this)
         }
         val compactView = RemoteViews(packageName, R.layout.opencb_background_notification).apply {
-            setTextViewText(R.id.opencb_background_title, "OpenCB đang chạy nền")
+            setTextViewText(R.id.opencb_background_title, "OpenCB")
             setTextViewText(R.id.opencb_background_action, "Gửi clipboard")
             setOnClickPendingIntent(
                 R.id.opencb_background_action,
@@ -438,7 +478,7 @@ class OpenCbBackgroundService : Service() {
             builder.setStyle(android.app.Notification.DecoratedCustomViewStyle())
         }
         return builder
-            .setSmallIcon(applicationInfo.icon)
+            .setSmallIcon(R.drawable.ic_stat_opencb)
             .setContentTitle("OpenCB đang chạy nền")
             .setContentText("Sync LAN sẵn sàng")
             .setContentIntent(pendingIntent)
@@ -451,7 +491,7 @@ class OpenCbBackgroundService : Service() {
             .setSound(null)
             .setVibrate(null)
             .setPriority(android.app.Notification.PRIORITY_MIN)
-            .setVisibility(android.app.Notification.VISIBILITY_PRIVATE)
+            .setVisibility(android.app.Notification.VISIBILITY_SECRET)
             .build()
     }
 
@@ -487,7 +527,6 @@ class MainActivity : FlutterActivity() {
     private val publicDownloadUris = mutableMapOf<String, Uri>()
     private val publicDownloadFiles = mutableMapOf<String, File>()
     private val contentInputStreams = mutableMapOf<String, InputStream>()
-    private val pendingSharedFiles = mutableListOf<Map<String, Any>>()
     private var pendingAndroidFilePickerResult: MethodChannel.Result? = null
     private var currentNavigationBarColor = defaultNavigationBarColor()
     private var currentStatusBarColor = defaultNavigationBarColor()
@@ -534,6 +573,7 @@ class MainActivity : FlutterActivity() {
         val channel = MethodChannel(flutterEngine.dartExecutor.binaryMessenger, "opencb/platform")
         platformChannel = channel
         OpenCbNotificationBridge.platformChannel = channel
+        OpenCbSharedFileBridge.platformChannel = channel
         channel.setMethodCallHandler { call, result ->
                 when (call.method) {
                     "getDeviceName" -> {
@@ -597,6 +637,8 @@ class MainActivity : FlutterActivity() {
                         val showFileOfferActions =
                             call.argument<Boolean>("showFileOfferActions") ?: false
                         val silent = call.argument<Boolean>("silent") ?: false
+                        val autoCancelAfterMs =
+                            call.argument<Number>("autoCancelAfterMs")?.toLong() ?: 0L
                         result.success(
                             showOpenCbNotification(
                                 title,
@@ -604,13 +646,12 @@ class MainActivity : FlutterActivity() {
                                 transferId,
                                 showFileOfferActions,
                                 silent,
+                                autoCancelAfterMs,
                             )
                         )
                     }
                     "consumeSharedFiles" -> {
-                        val files = pendingSharedFiles.toList()
-                        pendingSharedFiles.clear()
-                        result.success(files)
+                        result.success(OpenCbSharedFileBridge.consume())
                     }
                     "pickAndroidFiles" -> {
                         pickAndroidFiles(result)
@@ -809,17 +850,19 @@ class MainActivity : FlutterActivity() {
         ).apply {
             description = "Thông báo nhận file và sync LAN"
             enableVibration(true)
+            setShowBadge(false)
             lockscreenVisibility = android.app.Notification.VISIBILITY_PUBLIC
         }
         manager.createNotificationChannel(channel)
         val silentChannel = NotificationChannel(
             silentNotificationChannelId,
-            "OpenCB yên lặng",
+            "OpenCB thông báo tạm thời",
             NotificationManager.IMPORTANCE_HIGH,
         ).apply {
-            description = "Thông báo OpenCB không âm thanh hoặc rung"
+            description = "Thông báo kết quả ngắn, tự ẩn sau khi hiển thị"
             enableVibration(false)
             setSound(null, null)
+            setShowBadge(false)
             lockscreenVisibility = android.app.Notification.VISIBILITY_PUBLIC
         }
         manager.createNotificationChannel(silentChannel)
@@ -916,6 +959,7 @@ class MainActivity : FlutterActivity() {
         transferId: String?,
         showFileOfferActions: Boolean,
         silent: Boolean,
+        autoCancelAfterMs: Long,
     ): Boolean {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU &&
             checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) !=
@@ -949,13 +993,18 @@ class MainActivity : FlutterActivity() {
             android.app.Notification.Builder(this)
         }
         builder
-            .setSmallIcon(applicationInfo.icon)
+            .setSmallIcon(R.drawable.ic_stat_opencb)
+            .setLargeIcon(appIconBitmap(40))
             .setContentTitle(title)
             .setContentIntent(pendingIntent)
             .setAutoCancel(true)
+            .setNumber(0)
             .setPriority(android.app.Notification.PRIORITY_HIGH)
             .setVisibility(android.app.Notification.VISIBILITY_PUBLIC)
             .setOnlyAlertOnce(true)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            builder.setBadgeIconType(android.app.Notification.BADGE_ICON_NONE)
+        }
         if (silent) {
             builder
                 .setDefaults(0)
@@ -972,20 +1021,25 @@ class MainActivity : FlutterActivity() {
         if (showFileOfferActions && !transferId.isNullOrBlank()) {
             builder.addAction(
                 android.app.Notification.Action.Builder(
-                    applicationInfo.icon,
+                    R.drawable.ic_stat_opencb,
                     "Từ chối",
                     fileOfferActionIntent(transferId, notificationId, "reject"),
                 ).build()
             )
             builder.addAction(
                 android.app.Notification.Action.Builder(
-                    applicationInfo.icon,
+                    R.drawable.ic_stat_opencb,
                     "Nhận",
                     fileOfferActionIntent(transferId, notificationId, "accept"),
                 ).build()
             )
         }
         manager.notify(notificationId, builder.build())
+        if (autoCancelAfterMs > 0) {
+            Handler(Looper.getMainLooper()).postDelayed({
+                manager.cancel(notificationId)
+            }, autoCancelAfterMs)
+        }
         return true
     }
 
@@ -1017,13 +1071,9 @@ class MainActivity : FlutterActivity() {
         if (intent.action != Intent.ACTION_SEND && intent.action != Intent.ACTION_SEND_MULTIPLE) {
             return
         }
-        val files = sharedFileMapsFromIntent(intent, persistPermission = false)
+        val files = sharedFileMapsFromIntent(intent, persistPermission = true)
         if (files.isEmpty()) return
-        pendingSharedFiles.addAll(files)
-        if (notifyFlutter) {
-            platformChannel?.invokeMethod("sharedFiles", files)
-            pendingSharedFiles.removeAll(files.toSet())
-        }
+        OpenCbSharedFileBridge.push(files)
     }
 
     private fun sharedFileMapsFromIntent(
