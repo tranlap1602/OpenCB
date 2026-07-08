@@ -17,6 +17,14 @@ import 'package:path_provider/path_provider.dart';
 import 'package:qr_flutter/qr_flutter.dart';
 
 const MethodChannel _rootPlatformChannel = MethodChannel('opencb/platform');
+const String _appVersion = '1.1.0';
+const String _appVersionLabel = 'v$_appVersion';
+const String _landingPageUrl = 'https://tranlap1602.github.io/OpenCB/';
+const String _githubRepoUrl = 'https://github.com/tranlap1602/OpenCB';
+const String _latestReleaseApiUrl =
+    'https://api.github.com/repos/tranlap1602/OpenCB/releases/latest';
+const String _latestReleaseUrl =
+    'https://github.com/tranlap1602/OpenCB/releases/latest';
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
@@ -283,7 +291,7 @@ class SyncPeer {
   String get endpoint => '$host:$port';
   String get status => lastError == null ? 'Thiết bị tin cậy' : 'Lỗi sync';
   String get lastSynced {
-    if (lastError != null) return lastError!;
+    if (lastError != null) return _friendlySyncError(lastError!);
     if (lastSyncedAt == null) return 'Chưa từng sync';
     return 'Sync lần cuối ${_relativeTime(lastSyncedAt!)}';
   }
@@ -701,6 +709,16 @@ const List<M3ThemePreset> _m3ThemePresets = [
     name: 'San Hô Hoàng Hôn',
     seedColor: Color(0xFFB3261E),
   ),
+  M3ThemePreset(
+    id: 'mono_black_white',
+    name: 'Đen trắng',
+    seedColor: Color(0xFF1F1F1F),
+  ),
+  M3ThemePreset(
+    id: 'blue_grey',
+    name: 'Blue Grey',
+    seedColor: Color(0xFF607D8B),
+  ),
 ];
 
 class _TagIconOption {
@@ -823,6 +841,7 @@ class ClipboardSettings {
     required this.windowsAutoStart,
     required this.androidBackgroundSync,
     required this.androidClipboardSendPrompt,
+    required this.autoCheckUpdates,
   });
 
   factory ClipboardSettings.defaults() {
@@ -846,6 +865,7 @@ class ClipboardSettings {
       windowsAutoStart: false,
       androidBackgroundSync: true,
       androidClipboardSendPrompt: false,
+      autoCheckUpdates: true,
     );
   }
 
@@ -876,6 +896,7 @@ class ClipboardSettings {
       windowsAutoStart: json['windowsAutoStart'] as bool? ?? false,
       androidBackgroundSync: true,
       androidClipboardSendPrompt: false,
+      autoCheckUpdates: json['autoCheckUpdates'] as bool? ?? true,
     );
   }
 
@@ -890,6 +911,7 @@ class ClipboardSettings {
   final bool windowsAutoStart;
   final bool androidBackgroundSync;
   final bool androidClipboardSendPrompt;
+  final bool autoCheckUpdates;
 
   Map<String, dynamic> toJson() {
     return {
@@ -904,6 +926,7 @@ class ClipboardSettings {
       'windowsAutoStart': windowsAutoStart,
       'androidBackgroundSync': androidBackgroundSync,
       'androidClipboardSendPrompt': androidClipboardSendPrompt,
+      'autoCheckUpdates': autoCheckUpdates,
     };
   }
 
@@ -919,6 +942,7 @@ class ClipboardSettings {
     bool? windowsAutoStart,
     bool? androidBackgroundSync,
     bool? androidClipboardSendPrompt,
+    bool? autoCheckUpdates,
   }) {
     return ClipboardSettings(
       retentionLimit: _normalizeRetentionLimit(
@@ -945,6 +969,7 @@ class ClipboardSettings {
           androidBackgroundSync ?? this.androidBackgroundSync,
       androidClipboardSendPrompt:
           androidClipboardSendPrompt ?? this.androidClipboardSendPrompt,
+      autoCheckUpdates: autoCheckUpdates ?? this.autoCheckUpdates,
     );
   }
 }
@@ -1009,10 +1034,7 @@ class _OpenCbAppState extends State<OpenCbApp> with WidgetsBindingObserver {
 
   void _applyCurrentAndroidSystemUiStyle() {
     final brightness = _effectiveSystemUiBrightness;
-    final colorScheme = ColorScheme.fromSeed(
-      seedColor: _themePreset.seedColor,
-      brightness: brightness,
-    );
+    final colorScheme = _colorSchemeForPreset(_themePreset, brightness);
     _applyAndroidSystemUiStyle(
       brightness,
       navigationBarColor: colorScheme.surfaceContainerLowest,
@@ -1104,10 +1126,7 @@ class _OpenCbAppState extends State<OpenCbApp> with WidgetsBindingObserver {
 }
 
 ThemeData _buildTheme(Brightness brightness, M3ThemePreset preset) {
-  final colorScheme = ColorScheme.fromSeed(
-    seedColor: preset.seedColor,
-    brightness: brightness,
-  );
+  final colorScheme = _colorSchemeForPreset(preset, brightness);
   final typography = Typography.material2021();
   final textTheme =
       (brightness == Brightness.dark ? typography.white : typography.black)
@@ -1182,6 +1201,76 @@ ThemeData _buildTheme(Brightness brightness, M3ThemePreset preset) {
   );
 }
 
+ColorScheme _colorSchemeForPreset(M3ThemePreset preset, Brightness brightness) {
+  final base = ColorScheme.fromSeed(
+    seedColor: preset.seedColor,
+    brightness: brightness,
+  );
+  return switch (preset.id) {
+    'mono_black_white' =>
+      brightness == Brightness.dark
+          ? base.copyWith(
+              primary: const Color(0xFFE5E5E5),
+              onPrimary: const Color(0xFF1A1A1A),
+              primaryContainer: const Color(0xFF3A3A3A),
+              onPrimaryContainer: const Color(0xFFF2F2F2),
+              secondary: const Color(0xFFC7C7C7),
+              onSecondary: const Color(0xFF242424),
+              secondaryContainer: const Color(0xFF343434),
+              onSecondaryContainer: const Color(0xFFEDEDED),
+              tertiary: const Color(0xFFBDBDBD),
+              onTertiary: const Color(0xFF202020),
+              tertiaryContainer: const Color(0xFF2F2F2F),
+              onTertiaryContainer: const Color(0xFFEAEAEA),
+            )
+          : base.copyWith(
+              primary: const Color(0xFF111111),
+              onPrimary: Colors.white,
+              primaryContainer: const Color(0xFFE6E6E6),
+              onPrimaryContainer: const Color(0xFF111111),
+              secondary: const Color(0xFF555555),
+              onSecondary: Colors.white,
+              secondaryContainer: const Color(0xFFE0E0E0),
+              onSecondaryContainer: const Color(0xFF1D1D1D),
+              tertiary: const Color(0xFF707070),
+              onTertiary: Colors.white,
+              tertiaryContainer: const Color(0xFFE9E9E9),
+              onTertiaryContainer: const Color(0xFF202020),
+            ),
+    'blue_grey' =>
+      brightness == Brightness.dark
+          ? base.copyWith(
+              primary: const Color(0xFFB9CBD3),
+              onPrimary: const Color(0xFF102027),
+              primaryContainer: const Color(0xFF314952),
+              onPrimaryContainer: const Color(0xFFD7EAF1),
+              secondary: const Color(0xFFC1CED4),
+              onSecondary: const Color(0xFF253238),
+              secondaryContainer: const Color(0xFF3A4A51),
+              onSecondaryContainer: const Color(0xFFDDE8ED),
+              tertiary: const Color(0xFFAFC9DA),
+              onTertiary: const Color(0xFF193240),
+              tertiaryContainer: const Color(0xFF304D5C),
+              onTertiaryContainer: const Color(0xFFD3EAF7),
+            )
+          : base.copyWith(
+              primary: const Color(0xFF455A64),
+              onPrimary: Colors.white,
+              primaryContainer: const Color(0xFFD7E4EA),
+              onPrimaryContainer: const Color(0xFF102027),
+              secondary: const Color(0xFF607D8B),
+              onSecondary: Colors.white,
+              secondaryContainer: const Color(0xFFDCE8ED),
+              onSecondaryContainer: const Color(0xFF1B2A30),
+              tertiary: const Color(0xFF546E7A),
+              onTertiary: Colors.white,
+              tertiaryContainer: const Color(0xFFD8E7EF),
+              onTertiaryContainer: const Color(0xFF152A34),
+            ),
+    _ => base,
+  };
+}
+
 class ClipboardHomePage extends StatefulWidget {
   const ClipboardHomePage({
     super.key,
@@ -1228,6 +1317,9 @@ class _ClipboardHomePageState extends State<ClipboardHomePage>
   RawDatagramSocket? _discoverySocket;
   int _selectedIndex = 0;
   int? _mobilePageAnimationTargetIndex;
+  double? _mobileToolbarDragPosition;
+  bool _mobileToolbarDragging = false;
+  bool _settingsUpdatePageOpen = false;
   _HistoryScopeFilter _historyScopeFilter = _HistoryScopeFilter.all;
   bool _capturePaused = false;
   bool _lanSyncEnabled = true;
@@ -1238,6 +1330,7 @@ class _ClipboardHomePageState extends State<ClipboardHomePage>
   bool _openingMainFromQuickPicker = false;
   bool _syncHostRefreshInFlight = false;
   bool _mobileSearchOpen = false;
+  bool _checkingForUpdates = false;
   bool _appInForeground = true;
   DateTime _lastDiscoveredDevicePruneAt = DateTime.fromMillisecondsSinceEpoch(
     0,
@@ -1250,6 +1343,7 @@ class _ClipboardHomePageState extends State<ClipboardHomePage>
   ClipboardKind? _kindFilter;
   FileTransferStatus? _fileTransferStatusFilter;
   String? _syncError;
+  String? _latestUpdateMessage;
   String? _lastClipboardText;
   OpenCbStorage? _storage;
   LocalSyncIdentity _syncIdentity = LocalSyncIdentity.create();
@@ -1281,6 +1375,7 @@ class _ClipboardHomePageState extends State<ClipboardHomePage>
   List<SyncPeer> _peers = [];
   List<FileTransferRecord> _fileTransfers = [];
   List<FileTransferFile> _selectedTransferFiles = [];
+  final List<String> _pendingAndroidClipboardTexts = [];
   Map<String, DiscoveredSyncDevice> _discoveredDevices = {};
 
   @override
@@ -1363,7 +1458,7 @@ class _ClipboardHomePageState extends State<ClipboardHomePage>
       final text = args['text']?.toString();
       if (text == null || text.isEmpty) return null;
       final source = args['source']?.toString();
-      await _captureTextValue(
+      await _handleAndroidClipboardText(
         text,
         source: source == null || source.isEmpty ? 'Clipboard Android' : source,
       );
@@ -1390,6 +1485,42 @@ class _ClipboardHomePageState extends State<ClipboardHomePage>
       if (files == null || files.isEmpty) return;
       await _stageSharedFiles(files);
     } catch (_) {}
+  }
+
+  Future<void> _consumePendingAndroidClipboardTexts() async {
+    if (!Platform.isAndroid) return;
+    try {
+      final texts = await _platformChannel.invokeMethod<List<dynamic>>(
+        'consumeAndroidClipboardTexts',
+      );
+      if (texts != null) {
+        for (final text in texts) {
+          await _handleAndroidClipboardText(
+            text?.toString() ?? '',
+            source: 'Clipboard Android',
+          );
+        }
+      }
+    } catch (_) {}
+    while (_pendingAndroidClipboardTexts.isNotEmpty && _loaded) {
+      final text = _pendingAndroidClipboardTexts.removeAt(0);
+      await _captureTextValue(text, source: 'Clipboard Android');
+    }
+  }
+
+  Future<void> _handleAndroidClipboardText(
+    String text, {
+    required String source,
+  }) async {
+    if (text.trim().isEmpty) return;
+    if (!_loaded) {
+      if (_pendingAndroidClipboardTexts.isEmpty ||
+          _pendingAndroidClipboardTexts.last != text) {
+        _pendingAndroidClipboardTexts.add(text);
+      }
+      return;
+    }
+    await _captureTextValue(text, source: source);
   }
 
   List<ClipboardEntry> _visibleEntriesForSection(
@@ -1460,6 +1591,7 @@ class _ClipboardHomePageState extends State<ClipboardHomePage>
     await _migrateLegacyHistory(storage);
     await _cleanupLegacyPinnedItems(storage);
     await _loadEntries();
+    await _consumePendingAndroidClipboardTexts();
     if (Platform.isWindows && _clipboardSettings.windowsAutoStart) {
       unawaited(_applyWindowsAutoStart(true));
     }
@@ -1472,6 +1604,11 @@ class _ClipboardHomePageState extends State<ClipboardHomePage>
     );
     await _refreshAndroidBatteryOptimizationStatus();
     await _startNativeClipboardBridge();
+    if (_clipboardSettings.autoCheckUpdates) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) unawaited(_checkForUpdates(userInitiated: false));
+      });
+    }
   }
 
   Future<void> _migrateLegacyHistory(OpenCbStorage storage) async {
@@ -2516,6 +2653,16 @@ class _ClipboardHomePageState extends State<ClipboardHomePage>
         await socket.flush();
         return;
       }
+      if (request['action'] == 'ping') {
+        await _acceptDeviceUpdatedRequest(
+          request,
+          socket.remoteAddress.address,
+        );
+        unawaited(_showPongForPingRequest(request));
+        socket.writeln(jsonEncode({..._syncAckPayload(), 'action': 'pong'}));
+        await socket.flush();
+        return;
+      }
       final incoming = (request['items'] as List<dynamic>? ?? const [])
           .whereType<Map<String, dynamic>>()
           .map(ClipboardEntry.fromJson)
@@ -2628,6 +2775,27 @@ class _ClipboardHomePageState extends State<ClipboardHomePage>
       'action': 'deviceUpdated',
       'targetPairCode': peer.pairCode.trim().toUpperCase(),
     };
+  }
+
+  Map<String, dynamic> _pingPayloadForPeer(SyncPeer peer) {
+    return {
+      ..._syncAckPayload(),
+      'action': 'ping',
+      'targetPairCode': peer.pairCode.trim().toUpperCase(),
+    };
+  }
+
+  Future<void> _showPongForPingRequest(Map<String, dynamic> request) async {
+    const message = 'Pong!';
+    if (Platform.isAndroid && !_appInForeground) {
+      try {
+        await _platformChannel.invokeMethod<bool>('showToast', {
+          'message': message,
+        });
+        return;
+      } catch (_) {}
+    }
+    if (mounted) _showCenterSnackBar(message);
   }
 
   bool _isTrustedSyncRequest(Map<String, dynamic> request) {
@@ -4843,6 +5011,122 @@ class _ClipboardHomePageState extends State<ClipboardHomePage>
     }
   }
 
+  Future<void> _openExternalUrl(String url) async {
+    try {
+      if (Platform.isWindows) {
+        await Process.run('rundll32.exe', ['url.dll,FileProtocolHandler', url]);
+      } else if (Platform.isMacOS) {
+        await Process.run('open', [url]);
+      } else if (Platform.isLinux) {
+        await Process.run('xdg-open', [url]);
+      } else if (Platform.isAndroid) {
+        final opened = await _platformChannel.invokeMethod<bool>('openUrl', {
+          'url': url,
+        });
+        if (opened != true) throw PlatformException(code: 'open_failed');
+      } else {
+        await Clipboard.setData(ClipboardData(text: url));
+        _showCenterSnackBar('Đã copy đường dẫn.');
+      }
+    } catch (_) {
+      await Clipboard.setData(ClipboardData(text: url));
+      _showCenterSnackBar('Không mở được link, đã copy vào clipboard.');
+    }
+  }
+
+  Future<void> _checkForUpdates({bool userInitiated = true}) async {
+    if (_checkingForUpdates) return;
+    if (mounted) {
+      setState(() {
+        _checkingForUpdates = true;
+        if (userInitiated) _latestUpdateMessage = 'Đang kiểm tra...';
+      });
+    }
+
+    try {
+      final client = HttpClient()
+        ..connectionTimeout = const Duration(seconds: 8);
+      try {
+        final request = await client.getUrl(Uri.parse(_latestReleaseApiUrl));
+        request.headers.set(HttpHeaders.userAgentHeader, 'OpenCB/$_appVersion');
+        final response = await request.close();
+        final body = await response.transform(utf8.decoder).join();
+        if (response.statusCode < 200 || response.statusCode >= 300) {
+          throw const FormatException('Không đọc được thông tin release.');
+        }
+        final decoded = jsonDecode(body);
+        if (decoded is! Map<String, dynamic>) {
+          throw const FormatException('Release không hợp lệ.');
+        }
+        final tag = decoded['tag_name']?.toString().trim() ?? '';
+        final releaseUrl =
+            decoded['html_url']?.toString().trim().isNotEmpty == true
+            ? decoded['html_url'].toString().trim()
+            : _latestReleaseUrl;
+        if (tag.isEmpty) {
+          throw const FormatException('Release không có phiên bản.');
+        }
+        final hasUpdate = _isRemoteVersionNewer(tag, _appVersion);
+        if (!mounted) return;
+        setState(() {
+          _latestUpdateMessage = hasUpdate
+              ? 'Có bản mới $tag.'
+              : 'Bạn đang dùng bản mới nhất.';
+        });
+        if (hasUpdate) {
+          await _showUpdateAvailableDialog(tag, releaseUrl);
+        } else if (userInitiated) {
+          _showCenterSnackBar('Bạn đang dùng bản mới nhất.', success: true);
+        }
+      } finally {
+        client.close(force: true);
+      }
+    } catch (_) {
+      if (!mounted) return;
+      setState(() {
+        if (userInitiated) {
+          _latestUpdateMessage =
+              'Không kiểm tra được. Kiểm tra mạng hoặc quyền truy cập release.';
+        }
+      });
+      if (userInitiated) {
+        _showCenterSnackBar('Không kiểm tra được cập nhật.');
+      }
+    } finally {
+      if (mounted) setState(() => _checkingForUpdates = false);
+    }
+  }
+
+  Future<void> _showUpdateAvailableDialog(String tag, String releaseUrl) async {
+    if (!mounted) return;
+    await showDialog<void>(
+      context: context,
+      builder: (context) {
+        final colorScheme = Theme.of(context).colorScheme;
+        return AlertDialog(
+          icon: Icon(Icons.system_update_alt, color: colorScheme.primary),
+          title: Text('Đã có OpenCB $tag'),
+          content: const Text(
+            'Bạn có thể tải bản cài đặt mới nhất từ GitHub Releases.',
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(context).pop(),
+              child: const Text('Để sau'),
+            ),
+            FilledButton(
+              onPressed: () {
+                Navigator.of(context).pop();
+                unawaited(_openExternalUrl(releaseUrl));
+              },
+              child: const Text('Tải xuống'),
+            ),
+          ],
+        );
+      },
+    );
+  }
+
   Future<void> _openFileLocation(ClipboardEntry entry) async {
     final rawPath = (entry.filePath ?? entry.preview).trim();
     if (rawPath.isEmpty) {
@@ -5880,28 +6164,54 @@ class _ClipboardHomePageState extends State<ClipboardHomePage>
 
   Future<void> _testPeerConnection(SyncPeer peer) async {
     final index = _peers.indexWhere((item) => item.id == peer.id);
+    Socket? socket;
     try {
-      final socket = await Socket.connect(
+      socket = await Socket.connect(
         peer.host,
         peer.port,
         timeout: const Duration(seconds: 3),
       );
+      socket.writeln(jsonEncode(_pingPayloadForPeer(peer)));
+      await socket.flush();
+      final line = await utf8.decoder
+          .bind(socket)
+          .transform(const LineSplitter())
+          .first
+          .timeout(const Duration(seconds: 4));
       await socket.close();
+      socket = null;
+
+      final response = jsonDecode(line) as Map<String, dynamic>;
+      if (response['error'] != null) {
+        throw Exception(response['error']);
+      }
+      final gotPong = response['action'] == 'pong';
       if (index >= 0) {
+        final changed = _updatePeerFromSyncPayload(
+          response,
+          fallbackPeer: peer,
+          markSynced: true,
+        );
         setState(() {
-          _peers[index] = peer.copyWith(
-            lastSyncedAt: DateTime.now(),
-            clearError: true,
-          );
+          if (!changed && index < _peers.length) {
+            _peers[index] = peer.copyWith(
+              lastSyncedAt: DateTime.now(),
+              clearError: true,
+            );
+          }
         });
       }
-      _showCenterSnackBar('Kết nối ${peer.name} thành công.');
+      _showCenterSnackBar(
+        gotPong ? 'Ping ${peer.name}!' : 'Kết nối ${peer.name} thành công.',
+      );
     } catch (error) {
       final message = _friendlySyncError(error);
       if (index >= 0) {
         setState(() => _peers[index] = peer.copyWith(lastError: message));
       }
       _showCenterSnackBar('Không kết nối được ${peer.name}.');
+    } finally {
+      await socket?.close();
     }
     await _savePeers();
   }
@@ -6046,7 +6356,14 @@ class _ClipboardHomePageState extends State<ClipboardHomePage>
     final rawPage = _mobilePageController.page;
     final currentPage = rawPage?.round();
     if (currentPage == index && ((rawPage ?? index) - index).abs() < 0.001) {
-      _mobilePageAnimationTargetIndex = null;
+      if (_mobileToolbarDragging) return;
+      if (_mobilePageAnimationTargetIndex != null ||
+          _mobileToolbarDragPosition != null) {
+        setState(() {
+          _mobilePageAnimationTargetIndex = null;
+          _mobileToolbarDragPosition = null;
+        });
+      }
       return;
     }
     final fromPage = rawPage ?? currentPage?.toDouble() ?? 0;
@@ -6067,8 +6384,13 @@ class _ClipboardHomePageState extends State<ClipboardHomePage>
             curve: Curves.easeInOutCubic,
           )
           .whenComplete(() {
+            if (!mounted) return;
+            if (_mobileToolbarDragging) return;
             if (_mobilePageAnimationTargetIndex == index) {
-              _mobilePageAnimationTargetIndex = null;
+              setState(() {
+                _mobilePageAnimationTargetIndex = null;
+                _mobileToolbarDragPosition = null;
+              });
             }
           }),
     );
@@ -6077,6 +6399,7 @@ class _ClipboardHomePageState extends State<ClipboardHomePage>
   void _openFileTransferSectionForStagedFiles() {
     _section = 'Gửi file';
     _selectedIndex = 0;
+    _settingsUpdatePageOpen = false;
     _mobileSearchOpen = false;
     _fileTransferStatusFilter = null;
     WidgetsBinding.instance.addPostFrameCallback((_) {
@@ -6089,6 +6412,9 @@ class _ClipboardHomePageState extends State<ClipboardHomePage>
     setState(() {
       _section = section;
       _selectedIndex = 0;
+      if (section != 'Cài đặt') {
+        _settingsUpdatePageOpen = false;
+      }
       if (!_isClipboardSection) {
         _mobileSearchOpen = false;
       }
@@ -6122,11 +6448,107 @@ class _ClipboardHomePageState extends State<ClipboardHomePage>
         _historyScopeFilter = _HistoryScopeFilter.all;
       }
       _selectedIndex = 0;
+      if (section != 'Cài đặt') {
+        _settingsUpdatePageOpen = false;
+      }
       if (!_isClipboardSectionFor(section)) {
         _mobileSearchOpen = false;
       }
     });
     _syncMobilePageToSection(section);
+  }
+
+  void _openUpdateSettingsPage() {
+    setState(() {
+      _section = 'Cài đặt';
+      _settingsUpdatePageOpen = true;
+      _mobileSearchOpen = false;
+    });
+    _syncMobilePageToSection('Cài đặt');
+  }
+
+  void _closeUpdateSettingsPage() {
+    if (!_settingsUpdatePageOpen) return;
+    setState(() => _settingsUpdatePageOpen = false);
+  }
+
+  void _jumpMobilePageToToolbarPosition(double page) {
+    if (!_mobilePageController.hasClients ||
+        _mobilePageController.positions.length != 1) {
+      return;
+    }
+    final pagePosition = _mobilePageController.position;
+    final targetPixels = page * pagePosition.viewportDimension;
+    if (!targetPixels.isFinite) return;
+    pagePosition.jumpTo(
+      targetPixels.clamp(
+        pagePosition.minScrollExtent,
+        pagePosition.maxScrollExtent,
+      ),
+    );
+  }
+
+  void _updateMobileToolbarDragPosition(double position) {
+    if (!mounted || _mobileMainSections.isEmpty) return;
+    final clamped = position.clamp(
+      0.0,
+      (_mobileMainSections.length - 1).toDouble(),
+    );
+    final wasDragging = _mobileToolbarDragging;
+    _mobileToolbarDragPosition = clamped;
+    _mobilePageAnimationTargetIndex = null;
+    if (!wasDragging) {
+      setState(() => _mobileToolbarDragging = true);
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!mounted || !_mobileToolbarDragging) return;
+        _jumpMobilePageToToolbarPosition(_mobileToolbarDragPosition ?? clamped);
+      });
+      return;
+    }
+    _jumpMobilePageToToolbarPosition(clamped);
+  }
+
+  void _endMobileToolbarDrag(int index) {
+    if (!mounted || _mobileMainSections.isEmpty) return;
+    final clampedIndex = index.clamp(0, _mobileMainSections.length - 1).toInt();
+    final section = _mobileMainSections[clampedIndex];
+    final rawPage =
+        _mobilePageController.hasClients &&
+            _mobilePageController.positions.length == 1
+        ? _mobilePageController.page
+        : null;
+    final exactAtTarget =
+        ((rawPage ?? clampedIndex) - clampedIndex).abs() < 0.001;
+    if (exactAtTarget) {
+      setState(() {
+        _mobileToolbarDragging = false;
+        _mobileToolbarDragPosition = null;
+        _mobilePageAnimationTargetIndex = null;
+      });
+      _selectSection(section, syncMobilePage: false);
+      return;
+    }
+    setState(() {
+      _section = section;
+      _mobileToolbarDragging = false;
+      _mobileToolbarDragPosition = clampedIndex.toDouble();
+      _mobilePageAnimationTargetIndex = clampedIndex;
+      if (section == 'Lịch sử') {
+        _historyScopeFilter = _HistoryScopeFilter.all;
+      }
+      _selectedIndex = 0;
+      if (!_isClipboardSectionFor(section)) {
+        _mobileSearchOpen = false;
+      }
+    });
+    _syncMobilePageToSection(section);
+  }
+
+  void _cancelMobileToolbarDrag() {
+    if (!mounted || _mobileToolbarDragPosition == null) return;
+    _mobileToolbarDragging = false;
+    setState(() => _mobileToolbarDragPosition = null);
+    _syncMobilePageToSection(_section);
   }
 
   void _toggleMobileSearch() {
@@ -6208,6 +6630,7 @@ class _ClipboardHomePageState extends State<ClipboardHomePage>
                     Expanded(
                       child: _DetailPanel(
                         entry: sheetEntry,
+                        compact: true,
                         onRestore: () {
                           unawaited(_copyEntryToClipboard(sheetEntry));
                           Navigator.of(context).pop();
@@ -6327,6 +6750,9 @@ class _ClipboardHomePageState extends State<ClipboardHomePage>
           _openMobileEntryDetail(visibleEntries[index]);
         }
       },
+      onContextSelected: (index) {
+        setState(() => _selectedIndex = index);
+      },
     );
   }
 
@@ -6385,34 +6811,53 @@ class _ClipboardHomePageState extends State<ClipboardHomePage>
     }
 
     if (activeSection == 'Cài đặt') {
-      return _SettingsPage(
-        capturePaused: _capturePaused,
-        storagePath: _historyFilePathPreview(),
-        clipboardSettings: _clipboardSettings,
-        sourceSuggestions: _knownSourceSuggestions(),
-        themeMode: widget.themeMode,
-        themePreset: widget.themePreset,
-        androidIgnoringBatteryOptimizations:
-            _androidIgnoringBatteryOptimizations,
-        onToggleCapture: () {
-          setState(() => _capturePaused = !_capturePaused);
-          if (!_capturePaused) _captureClipboardText();
-        },
-        onRetentionLimitChanged: _updateRetentionLimit,
-        onClipboardSettingsChanged: _updateClipboardSettings,
-        onAddExcludedSource: _addExcludedSource,
-        onRemoveExcludedSource: _removeExcludedSource,
-        onThemeModeChanged: widget.onThemeModeChanged,
-        onThemePresetChanged: widget.onThemePresetChanged,
-        onOpenDataDirectory: () => unawaited(_openDataDirectory()),
-        onExportBackup: () => unawaited(_exportDataBackup()),
-        onRestoreBackup: () => unawaited(_restoreDataBackup()),
-        onResetClipboardHistory: () =>
-            unawaited(_confirmResetClipboardHistory()),
-        onOpenAndroidNotificationSettings: _openAndroidNotificationSettings,
-        onToggleAndroidBatteryOptimizationBypass: (enabled) =>
-            unawaited(_toggleAndroidBatteryOptimizationBypass(enabled)),
-        onOpenDevices: null,
+      return _SettingsPageSlideSwitcher(
+        showUpdatePage: _settingsUpdatePageOpen,
+        mainPage: _SettingsPage(
+          capturePaused: _capturePaused,
+          storagePath: _historyFilePathPreview(),
+          clipboardSettings: _clipboardSettings,
+          sourceSuggestions: _knownSourceSuggestions(),
+          themeMode: widget.themeMode,
+          themePreset: widget.themePreset,
+          androidIgnoringBatteryOptimizations:
+              _androidIgnoringBatteryOptimizations,
+          onToggleCapture: () {
+            setState(() => _capturePaused = !_capturePaused);
+            if (!_capturePaused) _captureClipboardText();
+          },
+          onRetentionLimitChanged: _updateRetentionLimit,
+          onClipboardSettingsChanged: _updateClipboardSettings,
+          onAddExcludedSource: _addExcludedSource,
+          onRemoveExcludedSource: _removeExcludedSource,
+          onThemeModeChanged: widget.onThemeModeChanged,
+          onThemePresetChanged: widget.onThemePresetChanged,
+          onOpenDataDirectory: () => unawaited(_openDataDirectory()),
+          onExportBackup: () => unawaited(_exportDataBackup()),
+          onRestoreBackup: () => unawaited(_restoreDataBackup()),
+          onResetClipboardHistory: () =>
+              unawaited(_confirmResetClipboardHistory()),
+          onOpenAndroidNotificationSettings: _openAndroidNotificationSettings,
+          onToggleAndroidBatteryOptimizationBypass: (enabled) =>
+              unawaited(_toggleAndroidBatteryOptimizationBypass(enabled)),
+          onOpenDevices: null,
+          onOpenUpdates: _openUpdateSettingsPage,
+        ),
+        updatePage: _UpdateSettingsPage(
+          currentVersion: _appVersionLabel,
+          autoCheckUpdates: _clipboardSettings.autoCheckUpdates,
+          checking: _checkingForUpdates,
+          latestMessage: _latestUpdateMessage,
+          onBack: _closeUpdateSettingsPage,
+          onCheckNow: () => unawaited(_checkForUpdates()),
+          onToggleAutoCheck: (value) => unawaited(
+            _updateClipboardSettings(
+              _clipboardSettings.copyWith(autoCheckUpdates: value),
+            ),
+          ),
+          onOpenLandingPage: () => unawaited(_openExternalUrl(_landingPageUrl)),
+          onOpenGithub: () => unawaited(_openExternalUrl(_githubRepoUrl)),
+        ),
       );
     }
 
@@ -6527,10 +6972,12 @@ class _ClipboardHomePageState extends State<ClipboardHomePage>
     final colorScheme = Theme.of(context).colorScheme;
     final activeSection = section ?? _section;
     final isClipboardSection = _isClipboardSectionFor(activeSection);
+    final showingUpdatePage =
+        activeSection == 'Cài đặt' && _settingsUpdatePageOpen;
     final title = switch (activeSection) {
       'Thiết bị' => 'Thiết bị LAN',
       'Gửi file' => 'Gửi file',
-      'Cài đặt' => 'Cài đặt',
+      'Cài đặt' => showingUpdatePage ? 'Cập nhật ứng dụng' : 'Cài đặt',
       _ => 'OpenCB',
     };
     if (isClipboardSection) {
@@ -6544,23 +6991,32 @@ class _ClipboardHomePageState extends State<ClipboardHomePage>
           padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
           child: Row(
             children: [
-              Text(
-                title,
-                style: Theme.of(
-                  context,
-                ).textTheme.titleLarge?.copyWith(fontWeight: FontWeight.w800),
-              ),
-              const Spacer(),
-              if (activeSection == 'Thiết bị') ...[
-                Tooltip(
-                  message: 'Sync tất cả thiết bị LAN',
-                  child: IconButton.filledTonal(
-                    onPressed: _syncAllPeers,
-                    icon: const Icon(Icons.sync),
+              if (activeSection == 'Cài đặt')
+                Expanded(
+                  child: _MobileSettingsTopBarTitle(
+                    showUpdatePage: showingUpdatePage,
+                    onBack: _closeUpdateSettingsPage,
                   ),
+                )
+              else ...[
+                Text(
+                  title,
+                  style: Theme.of(
+                    context,
+                  ).textTheme.titleLarge?.copyWith(fontWeight: FontWeight.w800),
                 ),
-                const SizedBox(width: 6),
-                Switch(value: _lanSyncEnabled, onChanged: _toggleLanSync),
+                const Spacer(),
+                if (activeSection == 'Thiết bị') ...[
+                  Tooltip(
+                    message: 'Sync tất cả thiết bị LAN',
+                    child: IconButton.filledTonal(
+                      onPressed: _syncAllPeers,
+                      icon: const Icon(Icons.sync),
+                    ),
+                  ),
+                  const SizedBox(width: 6),
+                  Switch(value: _lanSyncEnabled, onChanged: _toggleLanSync),
+                ],
               ],
             ],
           ),
@@ -6617,11 +7073,15 @@ class _ClipboardHomePageState extends State<ClipboardHomePage>
       );
     }
 
-    final showFloatingToolbar = true;
+    final showFloatingToolbar = !_settingsUpdatePageOpen;
     final showMobileSearchButton = showFloatingToolbar;
     return PopScope(
-      canPop: true,
+      canPop: !_settingsUpdatePageOpen,
       onPopInvokedWithResult: (didPop, result) {
+        if (didPop) return;
+        if (_settingsUpdatePageOpen) {
+          _closeUpdateSettingsPage();
+        }
         return;
       },
       child: Scaffold(
@@ -6638,8 +7098,15 @@ class _ClipboardHomePageState extends State<ClipboardHomePage>
                 children: [
                   PageView(
                     controller: _mobilePageController,
+                    pageSnapping: !_mobileToolbarDragging,
+                    physics: _mobileToolbarDragging
+                        ? const NeverScrollableScrollPhysics()
+                        : null,
                     onPageChanged: (index) {
                       if (index < 0 || index >= _mobileMainSections.length) {
+                        return;
+                      }
+                      if (_mobileToolbarDragging) {
                         return;
                       }
                       final targetIndex = _mobilePageAnimationTargetIndex;
@@ -6648,15 +7115,15 @@ class _ClipboardHomePageState extends State<ClipboardHomePage>
                       setState(() {
                         _section = pageSection;
                         _selectedIndex = 0;
+                        if (pageSection != 'Cài đặt') {
+                          _settingsUpdatePageOpen = false;
+                        }
                         if (!_isClipboardSectionFor(pageSection)) {
                           _mobileSearchOpen = false;
                         }
                       });
                       if (pageSection == 'Thiết bị') {
                         unawaited(_refreshSyncHost());
-                      }
-                      if (targetIndex == index) {
-                        _mobilePageAnimationTargetIndex = null;
                       }
                     },
                     children: [
@@ -6676,26 +7143,40 @@ class _ClipboardHomePageState extends State<ClipboardHomePage>
                               child: AnimatedBuilder(
                                 animation: _mobilePageController,
                                 builder: (context, _) {
+                                  final targetIndex =
+                                      _mobilePageAnimationTargetIndex;
                                   var selectedPosition =
                                       (selectedIndex < 0 ? 0 : selectedIndex)
                                           .toDouble();
-                                  if (_mobilePageController.hasClients &&
+                                  if (_mobileToolbarDragPosition != null) {
+                                    selectedPosition =
+                                        _mobileToolbarDragPosition!;
+                                  } else if (_mobilePageController.hasClients &&
                                       _mobilePageController.positions.length ==
                                           1) {
                                     selectedPosition =
                                         _mobilePageController.page ??
                                         selectedPosition;
                                   }
+                                  final effectiveSelectedIndex =
+                                      targetIndex ??
+                                      (selectedIndex < 0 ? 0 : selectedIndex);
+                                  final visualSelectedIndex =
+                                      _mobileToolbarDragPosition == null
+                                      ? effectiveSelectedIndex
+                                      : (selectedIndex < 0 ? 0 : selectedIndex);
                                   return _MobileFloatingToolbar(
                                     items: sections,
-                                    selectedIndex: selectedIndex < 0
-                                        ? 0
-                                        : selectedIndex,
+                                    selectedIndex: visualSelectedIndex,
                                     selectedPosition: selectedPosition,
                                     onSelected: (index) =>
                                         _selectMobileToolbarSection(
                                           sections[index].label,
                                         ),
+                                    onDragPositionChanged:
+                                        _updateMobileToolbarDragPosition,
+                                    onDragEnded: _endMobileToolbarDrag,
+                                    onDragCanceled: _cancelMobileToolbarDrag,
                                   );
                                 },
                               ),
@@ -6922,7 +7403,7 @@ class _Sidebar extends StatelessWidget {
         children: [
           Expanded(
             child: Padding(
-              padding: const EdgeInsets.only(left: 10),
+              padding: EdgeInsets.zero,
               child: NavigationRail(
                 extended: true,
                 selectedIndex: selectedIndex < 0 ? 0 : selectedIndex,
@@ -6985,7 +7466,7 @@ class _Sidebar extends StatelessWidget {
             ),
           ),
           Padding(
-            padding: const EdgeInsets.fromLTRB(12, 8, 10, 12),
+            padding: const EdgeInsets.fromLTRB(10, 8, 10, 12),
             child: _SidebarLanSyncControls(
               enabled: lanSyncEnabled,
               syncing: syncInFlight,
@@ -7009,80 +7490,245 @@ class _MobileSearchButton extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final colorScheme = Theme.of(context).colorScheme;
-    final background = active
-        ? Color.alphaBlend(
-            colorScheme.primary.withValues(alpha: 0.16),
-            colorScheme.surfaceContainerHigh,
-          )
-        : colorScheme.surfaceContainerHigh;
+    final isDark = colorScheme.brightness == Brightness.dark;
+    final glassFill = colorScheme.surfaceContainerHigh.withValues(
+      alpha: isDark ? 0.58 : 0.46,
+    );
+    final glassBorder = Color.alphaBlend(
+      colorScheme.primary.withValues(alpha: isDark ? 0.18 : 0.10),
+      colorScheme.outlineVariant.withValues(alpha: 0.34),
+    );
+    final activeFill = Color.alphaBlend(
+      colorScheme.primary.withValues(alpha: isDark ? 0.38 : 0.30),
+      colorScheme.surfaceContainerHighest.withValues(alpha: 0.74),
+    );
+    final background = active ? activeFill : glassFill;
     return Tooltip(
       message: active ? 'Ẩn tìm kiếm' : 'Tìm kiếm',
       child: AnimatedContainer(
         duration: const Duration(milliseconds: 220),
         curve: Curves.easeOutCubic,
+        width: 56,
+        height: 56,
         decoration: ShapeDecoration(
           color: background,
-          shape: const CircleBorder(),
+          shape: CircleBorder(side: BorderSide(color: glassBorder, width: 1.1)),
           shadows: [
             BoxShadow(
-              color: colorScheme.shadow.withValues(alpha: active ? 0.20 : 0.16),
-              blurRadius: active ? 10 : 8,
+              color: colorScheme.shadow.withValues(alpha: 0.14),
+              blurRadius: 18,
+              offset: const Offset(0, 8),
+            ),
+            BoxShadow(
+              color: colorScheme.primary.withValues(alpha: 0.08),
+              blurRadius: 28,
               offset: const Offset(0, 2),
             ),
           ],
         ),
-        child: Material(
-          color: Colors.transparent,
-          surfaceTintColor: colorScheme.primary,
-          shape: const CircleBorder(),
-          clipBehavior: Clip.antiAlias,
-          child: InkWell(
-            onTap: onPressed,
-            mouseCursor: SystemMouseCursors.click,
-            splashColor: colorScheme.primary.withValues(alpha: 0.10),
-            highlightColor: colorScheme.primary.withValues(alpha: 0.06),
-            child: SizedBox.square(
-              dimension: 56,
-              child: AnimatedSwitcher(
-                duration: const Duration(milliseconds: 260),
-                switchInCurve: Curves.easeOutCubic,
-                switchOutCurve: Curves.easeInCubic,
-                transitionBuilder: (child, animation) {
-                  final rotationCurve = CurvedAnimation(
-                    parent: animation,
-                    curve: Curves.easeOutCubic,
-                    reverseCurve: Curves.easeInCubic,
-                  );
-                  final scaleCurve = CurvedAnimation(
-                    parent: animation,
-                    curve: Curves.easeOutBack,
-                    reverseCurve: Curves.easeInCubic,
-                  );
-                  return FadeTransition(
-                    opacity: animation,
-                    child: RotationTransition(
-                      turns: Tween<double>(
-                        begin: active ? -0.25 : 0.25,
-                        end: 0,
-                      ).animate(rotationCurve),
-                      child: ScaleTransition(
-                        scale: Tween<double>(
-                          begin: 0.82,
-                          end: 1,
-                        ).animate(scaleCurve),
-                        child: child,
+        child: ClipOval(
+          child: BackdropFilter(
+            filter: ui.ImageFilter.blur(sigmaX: 16, sigmaY: 16),
+            child: Material(
+              color: Colors.transparent,
+              surfaceTintColor: colorScheme.primary,
+              shape: const CircleBorder(),
+              clipBehavior: Clip.antiAlias,
+              child: Stack(
+                children: [
+                  Positioned.fill(
+                    child: IgnorePointer(
+                      child: DecoratedBox(
+                        decoration: BoxDecoration(
+                          gradient: LinearGradient(
+                            begin: Alignment.topCenter,
+                            end: Alignment.bottomCenter,
+                            colors: [
+                              colorScheme.surfaceBright.withValues(
+                                alpha: isDark ? 0.05 : 0.20,
+                              ),
+                              colorScheme.surfaceContainerHighest.withValues(
+                                alpha: isDark ? 0.04 : 0.07,
+                              ),
+                              colorScheme.surfaceDim.withValues(
+                                alpha: isDark ? 0.06 : 0.03,
+                              ),
+                            ],
+                          ),
+                        ),
                       ),
                     ),
-                  );
-                },
-                child: Icon(
-                  active ? Icons.close : Icons.search,
-                  key: ValueKey(active),
-                  color: active ? Colors.black : colorScheme.onSurfaceVariant,
-                ),
+                  ),
+                  InkWell(
+                    onTap: onPressed,
+                    mouseCursor: SystemMouseCursors.click,
+                    splashFactory: NoSplash.splashFactory,
+                    overlayColor: const WidgetStatePropertyAll(
+                      Colors.transparent,
+                    ),
+                    hoverColor: Colors.transparent,
+                    focusColor: Colors.transparent,
+                    highlightColor: Colors.transparent,
+                    splashColor: Colors.transparent,
+                    child: Center(
+                      child: AnimatedSwitcher(
+                        duration: const Duration(milliseconds: 260),
+                        switchInCurve: Curves.easeOutCubic,
+                        switchOutCurve: Curves.easeInCubic,
+                        transitionBuilder: (child, animation) {
+                          final rotationCurve = CurvedAnimation(
+                            parent: animation,
+                            curve: Curves.easeOutCubic,
+                            reverseCurve: Curves.easeInCubic,
+                          );
+                          final scaleCurve = CurvedAnimation(
+                            parent: animation,
+                            curve: Curves.easeOutBack,
+                            reverseCurve: Curves.easeInCubic,
+                          );
+                          return FadeTransition(
+                            opacity: animation,
+                            child: RotationTransition(
+                              turns: Tween<double>(
+                                begin: active ? -0.25 : 0.25,
+                                end: 0,
+                              ).animate(rotationCurve),
+                              child: ScaleTransition(
+                                scale: Tween<double>(
+                                  begin: 0.82,
+                                  end: 1,
+                                ).animate(scaleCurve),
+                                child: child,
+                              ),
+                            ),
+                          );
+                        },
+                        child: Icon(
+                          active ? Icons.close : Icons.search,
+                          key: ValueKey(active),
+                          color: active
+                              ? Colors.black
+                              : colorScheme.onSurfaceVariant,
+                        ),
+                      ),
+                    ),
+                  ),
+                ],
               ),
             ),
           ),
+        ),
+      ),
+    );
+  }
+}
+
+class _MobileSettingsTopBarTitle extends StatefulWidget {
+  const _MobileSettingsTopBarTitle({
+    required this.showUpdatePage,
+    required this.onBack,
+  });
+
+  final bool showUpdatePage;
+  final VoidCallback onBack;
+
+  @override
+  State<_MobileSettingsTopBarTitle> createState() =>
+      _MobileSettingsTopBarTitleState();
+}
+
+class _MobileSettingsTopBarTitleState extends State<_MobileSettingsTopBarTitle>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _controller;
+  late final Animation<double> _curve;
+
+  @override
+  void initState() {
+    super.initState();
+    _controller = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 390),
+      reverseDuration: const Duration(milliseconds: 340),
+      value: widget.showUpdatePage ? 1 : 0,
+    );
+    _curve = CurvedAnimation(
+      parent: _controller,
+      curve: Curves.easeOutCubic,
+      reverseCurve: Curves.easeInCubic,
+    );
+  }
+
+  @override
+  void didUpdateWidget(covariant _MobileSettingsTopBarTitle oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (widget.showUpdatePage == oldWidget.showUpdatePage) return;
+    if (widget.showUpdatePage) {
+      _controller.forward();
+    } else {
+      _controller.reverse();
+    }
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final titleStyle = Theme.of(
+      context,
+    ).textTheme.titleLarge?.copyWith(fontWeight: FontWeight.w800);
+    return SizedBox(
+      height: 44,
+      child: ClipRect(
+        child: AnimatedBuilder(
+          animation: _curve,
+          builder: (context, _) {
+            final value = _curve.value;
+            return Stack(
+              fit: StackFit.expand,
+              children: [
+                FractionalTranslation(
+                  translation: Offset(-0.18 * value, 0),
+                  child: Opacity(
+                    opacity: 1 - (0.18 * value),
+                    child: Align(
+                      alignment: Alignment.centerLeft,
+                      child: Text('Cài đặt', style: titleStyle),
+                    ),
+                  ),
+                ),
+                FractionalTranslation(
+                  translation: Offset(1 - value, 0),
+                  child: Row(
+                    children: [
+                      IconButton(
+                        onPressed: widget.onBack,
+                        icon: const Icon(Icons.chevron_left_rounded),
+                        tooltip: 'Quay lại',
+                        padding: EdgeInsets.zero,
+                        constraints: const BoxConstraints.tightFor(
+                          width: 40,
+                          height: 40,
+                        ),
+                      ),
+                      const SizedBox(width: 4),
+                      Flexible(
+                        child: Text(
+                          'Cập nhật ứng dụng',
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                          style: titleStyle,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+            );
+          },
         ),
       ),
     );
@@ -7154,12 +7800,18 @@ class _MobileFloatingToolbar extends StatelessWidget {
     required this.selectedIndex,
     required this.selectedPosition,
     required this.onSelected,
+    required this.onDragPositionChanged,
+    required this.onDragEnded,
+    required this.onDragCanceled,
   });
 
   final List<({IconData icon, IconData selectedIcon, String label})> items;
   final int selectedIndex;
   final double selectedPosition;
   final ValueChanged<int> onSelected;
+  final ValueChanged<double> onDragPositionChanged;
+  final ValueChanged<int> onDragEnded;
+  final VoidCallback onDragCanceled;
 
   @override
   Widget build(BuildContext context) {
@@ -7180,7 +7832,7 @@ class _MobileFloatingToolbar extends StatelessWidget {
             estimatedItemWidth >= minItemWidthForLabels && textScale <= 1.18;
         final isDark = colorScheme.brightness == Brightness.dark;
         final glassFill = colorScheme.surfaceContainerHigh.withValues(
-          alpha: isDark ? 0.70 : 0.66,
+          alpha: isDark ? 0.58 : 0.46,
         );
         final glassBorder = Color.alphaBlend(
           colorScheme.primary.withValues(alpha: isDark ? 0.18 : 0.10),
@@ -7196,7 +7848,7 @@ class _MobileFloatingToolbar extends StatelessWidget {
           child: ClipRRect(
             borderRadius: BorderRadius.circular(999),
             child: BackdropFilter(
-              filter: ui.ImageFilter.blur(sigmaX: 12, sigmaY: 12),
+              filter: ui.ImageFilter.blur(sigmaX: 16, sigmaY: 16),
               child: DecoratedBox(
                 decoration: ShapeDecoration(
                   color: glassFill,
@@ -7231,12 +7883,12 @@ class _MobileFloatingToolbar extends StatelessWidget {
                                 end: Alignment.bottomCenter,
                                 colors: [
                                   colorScheme.surfaceBright.withValues(
-                                    alpha: isDark ? 0.08 : 0.34,
+                                    alpha: isDark ? 0.05 : 0.20,
                                   ),
                                   colorScheme.surfaceContainerHighest
-                                      .withValues(alpha: isDark ? 0.05 : 0.10),
+                                      .withValues(alpha: isDark ? 0.04 : 0.07),
                                   colorScheme.surfaceDim.withValues(
-                                    alpha: isDark ? 0.08 : 0.04,
+                                    alpha: isDark ? 0.06 : 0.03,
                                   ),
                                 ],
                               ),
@@ -7286,80 +7938,103 @@ class _MobileFloatingToolbar extends StatelessWidget {
                                   .round(),
                             );
                             final toolbarHeight = showLabels ? 52.0 : 44.0;
+                            double positionFromDx(double dx) {
+                              if (itemCount <= 1) return 0;
+                              return ((dx - itemWidth / 2) / (itemWidth + gap))
+                                  .clamp(0.0, (itemCount - 1).toDouble());
+                            }
 
-                            return SizedBox(
-                              height: toolbarHeight,
-                              child: Stack(
-                                children: [
-                                  AnimatedPositioned(
-                                    duration: isDraggingPage
-                                        ? Duration.zero
-                                        : indicatorDuration,
-                                    curve: Curves.easeInOutCubic,
-                                    left: indicatorLeft,
-                                    top: 0,
-                                    width: itemWidth,
-                                    height: toolbarHeight,
-                                    child: IgnorePointer(
-                                      child: TweenAnimationBuilder<double>(
-                                        key: ValueKey(
-                                          'toolbar-pill-squash-$clampedSelectedIndex',
-                                        ),
-                                        tween: Tween(begin: 0, end: 1),
-                                        duration: const Duration(
-                                          milliseconds: 480,
-                                        ),
-                                        curve: Curves.easeOutCubic,
-                                        builder: (context, value, child) {
-                                          final squash = math.sin(
-                                            value * math.pi,
-                                          );
-                                          return Transform.scale(
-                                            scaleX: 1 + squash * 0.025,
-                                            scaleY: 1 - squash * 0.08,
-                                            child: child,
-                                          );
-                                        },
-                                        child: DecoratedBox(
-                                          decoration: ShapeDecoration(
-                                            color: activePillColor,
-                                            shape: StadiumBorder(
-                                              side: BorderSide(
-                                                color: colorScheme.primary
-                                                    .withValues(alpha: 0.16),
+                            return GestureDetector(
+                              behavior: HitTestBehavior.translucent,
+                              onHorizontalDragStart: (details) =>
+                                  onDragPositionChanged(
+                                    positionFromDx(details.localPosition.dx),
+                                  ),
+                              onHorizontalDragUpdate: (details) =>
+                                  onDragPositionChanged(
+                                    positionFromDx(details.localPosition.dx),
+                                  ),
+                              onHorizontalDragEnd: (details) {
+                                final target = clampedSelectedPosition.round();
+                                onDragEnded(target);
+                              },
+                              onHorizontalDragCancel: onDragCanceled,
+                              child: SizedBox(
+                                height: toolbarHeight,
+                                child: Stack(
+                                  children: [
+                                    AnimatedPositioned(
+                                      duration: isDraggingPage
+                                          ? Duration.zero
+                                          : indicatorDuration,
+                                      curve: Curves.easeInOutCubic,
+                                      left: indicatorLeft,
+                                      top: 0,
+                                      width: itemWidth,
+                                      height: toolbarHeight,
+                                      child: IgnorePointer(
+                                        child: TweenAnimationBuilder<double>(
+                                          key: ValueKey(
+                                            'toolbar-pill-squash-$clampedSelectedIndex',
+                                          ),
+                                          tween: Tween(begin: 0, end: 1),
+                                          duration: const Duration(
+                                            milliseconds: 480,
+                                          ),
+                                          curve: Curves.easeOutCubic,
+                                          builder: (context, value, child) {
+                                            final squash = math.sin(
+                                              value * math.pi,
+                                            );
+                                            return Transform.scale(
+                                              scaleX: 1 + squash * 0.025,
+                                              scaleY: 1 - squash * 0.08,
+                                              child: child,
+                                            );
+                                          },
+                                          child: DecoratedBox(
+                                            decoration: ShapeDecoration(
+                                              color: activePillColor,
+                                              shape: StadiumBorder(
+                                                side: BorderSide(
+                                                  color: colorScheme.primary
+                                                      .withValues(alpha: 0.16),
+                                                ),
                                               ),
                                             ),
                                           ),
                                         ),
                                       ),
                                     ),
-                                  ),
-                                  Row(
-                                    mainAxisSize: MainAxisSize.max,
-                                    mainAxisAlignment: MainAxisAlignment.center,
-                                    children: [
-                                      for (
-                                        var index = 0;
-                                        index < items.length;
-                                        index++
-                                      ) ...[
-                                        Expanded(
-                                          child: _MobileFloatingToolbarItem(
-                                            icon: items[index].icon,
-                                            selectedIcon:
-                                                items[index].selectedIcon,
-                                            label: items[index].label,
-                                            selected: index == selectedIndex,
-                                            showLabel: showLabels,
-                                            onPressed: () => onSelected(index),
+                                    Row(
+                                      mainAxisSize: MainAxisSize.max,
+                                      mainAxisAlignment:
+                                          MainAxisAlignment.center,
+                                      children: [
+                                        for (
+                                          var index = 0;
+                                          index < items.length;
+                                          index++
+                                        ) ...[
+                                          Expanded(
+                                            child: _MobileFloatingToolbarItem(
+                                              icon: items[index].icon,
+                                              selectedIcon:
+                                                  items[index].selectedIcon,
+                                              label: items[index].label,
+                                              selected: index == selectedIndex,
+                                              showLabel: showLabels,
+                                              onPressed: () =>
+                                                  onSelected(index),
+                                            ),
                                           ),
-                                        ),
-                                        if (index != items.length - 1)
-                                          const SizedBox(width: gap),
+                                          if (index != items.length - 1)
+                                            const SizedBox(width: gap),
+                                        ],
                                       ],
-                                    ],
-                                  ),
-                                ],
+                                    ),
+                                  ],
+                                ),
                               ),
                             );
                           },
@@ -7434,8 +8109,12 @@ class _MobileFloatingToolbarItem extends StatelessWidget {
         child: InkWell(
           onTap: onPressed,
           mouseCursor: SystemMouseCursors.click,
-          splashColor: colorScheme.primary.withValues(alpha: 0.10),
-          highlightColor: colorScheme.primary.withValues(alpha: 0.06),
+          splashFactory: NoSplash.splashFactory,
+          overlayColor: const WidgetStatePropertyAll(Colors.transparent),
+          hoverColor: Colors.transparent,
+          focusColor: Colors.transparent,
+          highlightColor: Colors.transparent,
+          splashColor: Colors.transparent,
           child: SizedBox.expand(
             child: Padding(
               padding: const EdgeInsets.symmetric(horizontal: 5),
@@ -7849,14 +8528,23 @@ class _OpenCbFileShareIconPainter extends CustomPainter {
 
   @override
   void paint(Canvas canvas, Size size) {
-    final paint = Paint()
+    final fillPaint = Paint()
       ..color = color
       ..style = PaintingStyle.fill
       ..isAntiAlias = true;
+    final strokePaint = Paint()
+      ..color = color
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 10
+      ..strokeJoin = StrokeJoin.round
+      ..strokeCap = StrokeCap.round
+      ..isAntiAlias = true;
     canvas.save();
     canvas.scale(size.width / 512, size.height / 512);
-    canvas.drawPath(_topPath, paint);
-    canvas.drawPath(_bottomPath, paint);
+    canvas.drawPath(_topPath, strokePaint);
+    canvas.drawPath(_bottomPath, strokePaint);
+    canvas.drawPath(_topPath, fillPaint);
+    canvas.drawPath(_bottomPath, fillPaint);
     canvas.restore();
   }
 
@@ -7974,6 +8662,7 @@ class _TopBar extends StatelessWidget {
                           controller: searchController,
                           focusNode: searchFocusNode,
                           mouseCursor: SystemMouseCursors.click,
+                          textAlignVertical: TextAlignVertical.center,
                           decoration: InputDecoration(
                             isDense: true,
                             labelText: 'Tìm kiếm',
@@ -7987,7 +8676,7 @@ class _TopBar extends StatelessWidget {
                             fillColor: colorScheme.surfaceContainerHigh,
                             contentPadding: const EdgeInsets.symmetric(
                               horizontal: 14,
-                              vertical: 9,
+                              vertical: 7,
                             ),
                             border: OutlineInputBorder(
                               borderRadius: BorderRadius.circular(21),
@@ -8371,6 +9060,7 @@ class _QuickPickerShellState extends State<_QuickPickerShell> {
   ClipboardKind? _selectedKindFilter;
   String? _quickPickerPromotedEntryId;
   int _quickPickerPromotionToken = 0;
+  String? _expandedImageEntryId;
   int _selectedIndex = 0;
   bool _pinned = false;
   bool _showPinnedOnly = false;
@@ -8624,7 +9314,7 @@ class _QuickPickerShellState extends State<_QuickPickerShell> {
                   AnimatedContainer(
                     duration: const Duration(milliseconds: 180),
                     curve: Curves.easeOutCubic,
-                    width: _searchExpanded ? 128 : 36,
+                    width: _searchExpanded ? 108 : 36,
                     child: _searchExpanded
                         ? Focus(
                             onKeyEvent: _handleKey,
@@ -8819,7 +9509,14 @@ class _QuickPickerShellState extends State<_QuickPickerShell> {
                             entry: entry,
                             tagDefinitions: widget.tagDefinitions,
                             selected: index == _selectedIndex,
+                            imageExpanded: _expandedImageEntryId == entry.id,
                             onTogglePin: () => _toggleEntryPin(entry),
+                            onToggleImagePreview: () => setState(() {
+                              _expandedImageEntryId =
+                                  _expandedImageEntryId == entry.id
+                                  ? null
+                                  : entry.id;
+                            }),
                             onSelected: () => unawaited(
                               widget.onSelected(entry, keepOpen: _pinned),
                             ),
@@ -8954,7 +9651,9 @@ class _QuickPickerRow extends StatelessWidget {
     required this.entry,
     required this.tagDefinitions,
     required this.selected,
+    required this.imageExpanded,
     required this.onTogglePin,
+    required this.onToggleImagePreview,
     required this.onSelected,
     required this.onOpenItem,
     required this.onDelete,
@@ -8963,7 +9662,9 @@ class _QuickPickerRow extends StatelessWidget {
   final ClipboardEntry entry;
   final Map<String, TagDefinition> tagDefinitions;
   final bool selected;
+  final bool imageExpanded;
   final VoidCallback onTogglePin;
+  final VoidCallback onToggleImagePreview;
   final VoidCallback onSelected;
   final VoidCallback onOpenItem;
   final VoidCallback onDelete;
@@ -9059,134 +9760,171 @@ class _QuickPickerRow extends StatelessWidget {
             },
             child: Padding(
               padding: EdgeInsets.fromLTRB(selected ? 7 : 10, 10, 10, 10),
-              child: Row(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
                 children: [
-                  AnimatedContainer(
-                    duration: const Duration(milliseconds: 120),
-                    width: selected ? 4 : 0,
-                    height: 46,
-                    decoration: ShapeDecoration(
-                      color: colorScheme.primary,
-                      shape: const StadiumBorder(),
-                    ),
-                  ),
-                  if (selected) const SizedBox(width: 8),
-                  Icon(
-                    _kindIcon(entry.kind),
-                    size: 17,
-                    color: selected
-                        ? colorScheme.onSecondaryContainer
-                        : colorScheme.onSurfaceVariant,
-                  ),
-                  const SizedBox(width: 10),
-                  Expanded(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Row(
-                          children: [
-                            Expanded(
-                              child: Text(
-                                entry.preview,
-                                maxLines: 1,
-                                overflow: TextOverflow.ellipsis,
-                                style: Theme.of(context).textTheme.bodySmall
-                                    ?.copyWith(
-                                      color: selected
-                                          ? colorScheme.onSecondaryContainer
-                                          : colorScheme.onSurface,
-                                      fontWeight: FontWeight.w800,
-                                      height: 1.08,
-                                    ),
-                              ),
-                            ),
-                          ],
-                        ),
-                        const SizedBox(height: 4),
-                        Row(
-                          children: [
-                            if (_hasUsableSourceIcon(entry)) ...[
-                              _SourceAppIcon(entry: entry, dimension: 16),
-                              const SizedBox(width: 6),
-                            ],
-                            Expanded(
-                              child: Text(
-                                '${_quickPickerMetaKindLabel(entry.kind)} - ${_displaySourceLabel(entry.source)}',
-                                maxLines: 1,
-                                overflow: TextOverflow.ellipsis,
-                                style: Theme.of(context).textTheme.bodySmall
-                                    ?.copyWith(
-                                      color: selected
-                                          ? colorScheme.onSecondaryContainer
-                                          : colorScheme.onSurfaceVariant,
-                                      fontSize: 11.5,
-                                      height: 1.05,
-                                    ),
-                              ),
-                            ),
-                            const SizedBox(width: 8),
-                            _MiniChip(
-                              label: entry.createdLabel,
-                              timeTone: true,
-                            ),
-                          ],
-                        ),
-                        if (entry.tags.isNotEmpty) ...[
-                          const SizedBox(height: 6),
-                          Wrap(
-                            spacing: 6,
-                            runSpacing: 6,
-                            children: [
-                              for (final tag in entry.tags.take(3))
-                                ConstrainedBox(
-                                  constraints: const BoxConstraints(
-                                    maxWidth: 110,
-                                  ),
-                                  child: _TagBadge(
-                                    label: tag,
-                                    definition: tagDefinitions[tag],
-                                  ),
-                                ),
-                            ],
-                          ),
-                        ],
-                      ],
-                    ),
-                  ),
-                  if (entry.kind == ClipboardKind.image &&
-                      entry.imageBytes != null &&
-                      entry.imageBytes!.isNotEmpty) ...[
-                    const SizedBox(width: 8),
-                    _QuickPickerImageThumb(imageBytes: entry.imageBytes!),
-                  ],
-                  const SizedBox(width: 10),
-                  Tooltip(
-                    message: entry.pinned ? 'Bỏ ghim mục này' : 'Ghim mục này',
-                    child: SizedBox.square(
-                      dimension: 32,
-                      child: IconButton(
-                        visualDensity: VisualDensity.compact,
-                        style: IconButton.styleFrom(
-                          alignment: Alignment.center,
-                          fixedSize: const Size.square(32),
-                          maximumSize: const Size.square(32),
-                          minimumSize: const Size.square(32),
-                          padding: EdgeInsets.zero,
-                          tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-                          backgroundColor: entry.pinned
-                              ? colorScheme.tertiaryContainer
-                              : Colors.transparent,
-                          foregroundColor: entry.pinned
-                              ? colorScheme.onTertiaryContainer
-                              : colorScheme.onSurfaceVariant,
-                        ),
-                        onPressed: onTogglePin,
-                        iconSize: 17,
-                        icon: Icon(
-                          entry.pinned ? Icons.bookmark : Icons.bookmark_border,
+                  Row(
+                    children: [
+                      AnimatedContainer(
+                        duration: const Duration(milliseconds: 120),
+                        width: selected ? 4 : 0,
+                        height: 46,
+                        decoration: ShapeDecoration(
+                          color: colorScheme.primary,
+                          shape: const StadiumBorder(),
                         ),
                       ),
-                    ),
+                      if (selected) const SizedBox(width: 8),
+                      Icon(
+                        _kindIcon(entry.kind),
+                        size: 17,
+                        color: selected
+                            ? colorScheme.onSecondaryContainer
+                            : colorScheme.onSurfaceVariant,
+                      ),
+                      const SizedBox(width: 10),
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Row(
+                              children: [
+                                Expanded(
+                                  child: Text(
+                                    entry.preview,
+                                    maxLines: 1,
+                                    overflow: TextOverflow.ellipsis,
+                                    style: Theme.of(context).textTheme.bodySmall
+                                        ?.copyWith(
+                                          color: selected
+                                              ? colorScheme.onSecondaryContainer
+                                              : colorScheme.onSurface,
+                                          fontWeight: FontWeight.w800,
+                                          height: 1.08,
+                                        ),
+                                  ),
+                                ),
+                              ],
+                            ),
+                            const SizedBox(height: 4),
+                            Row(
+                              children: [
+                                if (_shouldShowSourceIcon(entry)) ...[
+                                  _SourceAppIcon(entry: entry, dimension: 16),
+                                  const SizedBox(width: 6),
+                                ],
+                                Expanded(
+                                  child: Text(
+                                    '${_quickPickerMetaKindLabel(entry.kind)} - ${_displaySourceLabel(entry.source)}',
+                                    maxLines: 1,
+                                    overflow: TextOverflow.ellipsis,
+                                    style: Theme.of(context).textTheme.bodySmall
+                                        ?.copyWith(
+                                          color: selected
+                                              ? colorScheme.onSecondaryContainer
+                                              : colorScheme.onSurfaceVariant,
+                                          fontSize: 11.5,
+                                          height: 1.05,
+                                        ),
+                                  ),
+                                ),
+                                const SizedBox(width: 8),
+                                _MiniChip(
+                                  label: entry.createdLabel,
+                                  timeTone: true,
+                                ),
+                              ],
+                            ),
+                            if (entry.tags.isNotEmpty) ...[
+                              const SizedBox(height: 6),
+                              Wrap(
+                                spacing: 6,
+                                runSpacing: 6,
+                                children: [
+                                  for (final tag in entry.tags.take(3))
+                                    ConstrainedBox(
+                                      constraints: const BoxConstraints(
+                                        maxWidth: 110,
+                                      ),
+                                      child: _TagBadge(
+                                        label: tag,
+                                        definition: tagDefinitions[tag],
+                                      ),
+                                    ),
+                                ],
+                              ),
+                            ],
+                          ],
+                        ),
+                      ),
+                      if (entry.kind == ClipboardKind.image &&
+                          entry.imageBytes != null &&
+                          entry.imageBytes!.isNotEmpty) ...[
+                        const SizedBox(width: 8),
+                        Tooltip(
+                          message: imageExpanded
+                              ? 'Thu nhỏ preview'
+                              : 'Phóng to preview',
+                          child: GestureDetector(
+                            onTap: onToggleImagePreview,
+                            child: _QuickPickerImageThumb(
+                              imageBytes: entry.imageBytes!,
+                              expanded: imageExpanded,
+                            ),
+                          ),
+                        ),
+                      ],
+                      const SizedBox(width: 10),
+                      Tooltip(
+                        message: entry.pinned
+                            ? 'Bỏ ghim mục này'
+                            : 'Ghim mục này',
+                        child: SizedBox.square(
+                          dimension: 32,
+                          child: IconButton(
+                            visualDensity: VisualDensity.compact,
+                            style: IconButton.styleFrom(
+                              alignment: Alignment.center,
+                              fixedSize: const Size.square(32),
+                              maximumSize: const Size.square(32),
+                              minimumSize: const Size.square(32),
+                              padding: EdgeInsets.zero,
+                              tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                              backgroundColor: entry.pinned
+                                  ? colorScheme.tertiaryContainer
+                                  : Colors.transparent,
+                              foregroundColor: entry.pinned
+                                  ? colorScheme.onTertiaryContainer
+                                  : colorScheme.onSurfaceVariant,
+                            ),
+                            onPressed: onTogglePin,
+                            iconSize: 17,
+                            icon: Icon(
+                              entry.pinned
+                                  ? Icons.bookmark
+                                  : Icons.bookmark_border,
+                            ),
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                  AnimatedSize(
+                    duration: const Duration(milliseconds: 180),
+                    curve: Curves.easeOutCubic,
+                    alignment: Alignment.topCenter,
+                    child:
+                        imageExpanded &&
+                            entry.kind == ClipboardKind.image &&
+                            entry.imageBytes != null &&
+                            entry.imageBytes!.isNotEmpty
+                        ? Padding(
+                            padding: const EdgeInsets.only(top: 10),
+                            child: _QuickPickerExpandedImagePreview(
+                              imageBytes: entry.imageBytes!,
+                            ),
+                          )
+                        : const SizedBox.shrink(),
                   ),
                 ],
               ),
@@ -9198,8 +9936,8 @@ class _QuickPickerRow extends StatelessWidget {
   }
 }
 
-class _QuickPickerImageThumb extends StatelessWidget {
-  const _QuickPickerImageThumb({required this.imageBytes});
+class _QuickPickerExpandedImagePreview extends StatelessWidget {
+  const _QuickPickerExpandedImagePreview({required this.imageBytes});
 
   final Uint8List imageBytes;
 
@@ -9207,22 +9945,73 @@ class _QuickPickerImageThumb extends StatelessWidget {
   Widget build(BuildContext context) {
     final colorScheme = Theme.of(context).colorScheme;
     return ClipRRect(
-      borderRadius: BorderRadius.circular(8),
+      borderRadius: BorderRadius.circular(10),
       child: Container(
-        width: 46,
-        height: 46,
+        height: 270,
         color: colorScheme.surfaceContainerHighest,
-        child: Image.memory(
-          imageBytes,
-          fit: BoxFit.cover,
-          gaplessPlayback: true,
-          errorBuilder: (context, error, stackTrace) {
-            return Icon(
-              Icons.broken_image_outlined,
-              size: 22,
-              color: colorScheme.onSurfaceVariant,
-            );
-          },
+        child: Center(
+          child: Image.memory(
+            imageBytes,
+            fit: BoxFit.contain,
+            gaplessPlayback: true,
+            errorBuilder: (context, error, stackTrace) {
+              return Icon(
+                Icons.broken_image_outlined,
+                size: 28,
+                color: colorScheme.onSurfaceVariant,
+              );
+            },
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _QuickPickerImageThumb extends StatelessWidget {
+  const _QuickPickerImageThumb({
+    required this.imageBytes,
+    this.expanded = false,
+  });
+
+  final Uint8List imageBytes;
+  final bool expanded;
+
+  @override
+  Widget build(BuildContext context) {
+    final colorScheme = Theme.of(context).colorScheme;
+    return AnimatedContainer(
+      duration: const Duration(milliseconds: 160),
+      curve: Curves.easeOutCubic,
+      decoration: ShapeDecoration(
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(8),
+          side: BorderSide(
+            color: expanded
+                ? colorScheme.primary
+                : colorScheme.outlineVariant.withValues(alpha: 0.72),
+            width: expanded ? 2 : 1,
+          ),
+        ),
+      ),
+      child: ClipRRect(
+        borderRadius: BorderRadius.circular(7),
+        child: Container(
+          width: 46,
+          height: 46,
+          color: colorScheme.surfaceContainerHighest,
+          child: Image.memory(
+            imageBytes,
+            fit: BoxFit.cover,
+            gaplessPlayback: true,
+            errorBuilder: (context, error, stackTrace) {
+              return Icon(
+                Icons.broken_image_outlined,
+                size: 22,
+                color: colorScheme.onSurfaceVariant,
+              );
+            },
+          ),
         ),
       ),
     );
@@ -9530,6 +10319,7 @@ class _HistoryList extends StatelessWidget {
     this.hideHeaderActions = false,
     this.headerReplacement,
     required this.onSelected,
+    required this.onContextSelected,
   });
 
   final String title;
@@ -9565,6 +10355,7 @@ class _HistoryList extends StatelessWidget {
   final bool hideHeaderActions;
   final Widget? headerReplacement;
   final ValueChanged<int> onSelected;
+  final ValueChanged<int> onContextSelected;
 
   @override
   Widget build(BuildContext context) {
@@ -9753,7 +10544,7 @@ class _HistoryList extends StatelessWidget {
                               : () => onSelected(index),
                           onToggleBulkSelected: () =>
                               onToggleBulkSelected(entry),
-                          onContextMenuOpened: () => onSelected(index),
+                          onContextMenuOpened: () => onContextSelected(index),
                           onCopy: () => onCopy(entry),
                           onTogglePin: () => onTogglePin(entry),
                           onEditTags: () => onEditTags(entry),
@@ -10982,6 +11773,8 @@ class _ClipboardTile extends StatefulWidget {
 }
 
 class _ClipboardTileState extends State<_ClipboardTile> {
+  bool _suppressNextTap = false;
+
   void _showContextMenu(BuildContext context, Offset position) {
     widget.onContextMenuOpened();
     _ClipboardTile._closeOpenContextMenu();
@@ -11081,10 +11874,20 @@ class _ClipboardTileState extends State<_ClipboardTile> {
           child: GestureDetector(
             onSecondaryTapDown: (details) =>
                 _showContextMenu(context, details.globalPosition),
+            onLongPressStart: (details) {
+              _suppressNextTap = true;
+              _showContextMenu(context, details.globalPosition);
+            },
             child: InkWell(
               borderRadius: borderRadius,
               mouseCursor: SystemMouseCursors.click,
-              onTap: widget.onTap,
+              onTap: () {
+                if (_suppressNextTap) {
+                  _suppressNextTap = false;
+                  return;
+                }
+                widget.onTap();
+              },
               child: Container(
                 padding: EdgeInsets.fromLTRB(
                   widget.selected ? 8 : 12,
@@ -11154,11 +11957,13 @@ class _ClipboardTileState extends State<_ClipboardTile> {
                           const SizedBox(height: 8),
                           Row(
                             children: [
-                              _SourceAppIcon(
-                                entry: widget.entry,
-                                dimension: 18,
-                              ),
-                              const SizedBox(width: 6),
+                              if (_shouldShowSourceIcon(widget.entry)) ...[
+                                _SourceAppIcon(
+                                  entry: widget.entry,
+                                  dimension: 18,
+                                ),
+                                const SizedBox(width: 6),
+                              ],
                               Expanded(
                                 child: Row(
                                   children: [
@@ -11333,8 +12138,11 @@ class _SourceAppIcon extends StatelessWidget {
   Widget build(BuildContext context) {
     final colorScheme = Theme.of(context).colorScheme;
     final iconBytes = entry.sourceIconBytes;
+    final fallbackIcon = _shouldUseDeviceSourceIcon(entry)
+        ? Icons.devices_other_outlined
+        : _kindIcon(entry.kind);
     final fallback = Icon(
-      _kindIcon(entry.kind),
+      fallbackIcon,
       size: 18,
       color: colorScheme.onSurfaceVariant,
     );
@@ -11364,6 +12172,41 @@ class _SourceAppIcon extends StatelessWidget {
 bool _hasUsableSourceIcon(ClipboardEntry entry) {
   final iconBytes = entry.sourceIconBytes;
   return iconBytes != null && _isPngBytes(iconBytes);
+}
+
+bool _shouldUseDeviceSourceIcon(ClipboardEntry entry) {
+  if (_hasUsableSourceIcon(entry)) return false;
+  return _isLikelySyncedDeviceSource(entry.source);
+}
+
+bool _shouldShowSourceIcon(ClipboardEntry entry) {
+  if (Platform.isAndroid && _isPlainClipboardSource(entry.source)) {
+    return false;
+  }
+  return _hasUsableSourceIcon(entry) || _shouldUseDeviceSourceIcon(entry);
+}
+
+bool _isPlainClipboardSource(String source) {
+  final normalized = _displaySourceLabel(source).trim().toLowerCase();
+  return normalized == 'clipboard android' ||
+      normalized == 'clipboard hệ thống' ||
+      normalized == 'clipboard he thong';
+}
+
+bool _isLikelySyncedDeviceSource(String source) {
+  final normalized = _displaySourceLabel(source).trim().toLowerCase();
+  if (normalized.isEmpty) return false;
+  const localSources = {
+    'clipboard',
+    'clipboard hệ thống',
+    'clipboard he thong',
+    'clipboard android',
+    'file explorer',
+    'windows explorer',
+  };
+  if (localSources.contains(normalized)) return false;
+  if (normalized.endsWith('.exe')) return false;
+  return true;
 }
 
 class _CompactSheetDragHandle extends StatelessWidget {
@@ -11510,6 +12353,7 @@ class _DetailPanel extends StatelessWidget {
       fixedSize: const Size.square(38),
       minimumSize: const Size.square(38),
       maximumSize: const Size.square(38),
+      padding: EdgeInsets.zero,
       tapTargetSize: MaterialTapTargetSize.shrinkWrap,
       visualDensity: VisualDensity.compact,
     );
@@ -11584,6 +12428,7 @@ class _DetailPanel extends StatelessWidget {
                               label: 'Copy',
                               successLabel: 'Copied',
                               variant: _MotionFeedbackButtonVariant.filledTonal,
+                              labelYOffset: compact ? 1 : -1,
                             ),
                           ),
                           if (entry.kind == ClipboardKind.url)
@@ -11690,10 +12535,13 @@ class _DetailPanel extends StatelessWidget {
                                 ? IconButton.filledTonal(
                                     onPressed: onTogglePin,
                                     style: detailIconButtonStyle,
-                                    icon: Icon(
-                                      entry.pinned
-                                          ? Icons.bookmark
-                                          : Icons.bookmark_border,
+                                    icon: Transform.translate(
+                                      offset: Offset(compact ? 0 : -0.75, 0),
+                                      child: Icon(
+                                        entry.pinned
+                                            ? Icons.bookmark
+                                            : Icons.bookmark_border,
+                                      ),
                                     ),
                                   )
                                 : FilledButton.tonalIcon(
@@ -11716,7 +12564,10 @@ class _DetailPanel extends StatelessWidget {
                                 ? IconButton.filledTonal(
                                     onPressed: onEditTags,
                                     style: detailIconButtonStyle,
-                                    icon: const Icon(Icons.sell_outlined),
+                                    icon: Transform.translate(
+                                      offset: Offset(compact ? 0.75 : 0, 0),
+                                      child: const Icon(Icons.sell_outlined),
+                                    ),
                                   )
                                 : FilledButton.tonalIcon(
                                     onPressed: onEditTags,
@@ -11732,7 +12583,12 @@ class _DetailPanel extends StatelessWidget {
                               onPressed: onDelete,
                               style: deleteActionButtonStyle,
                               icon: const Icon(Icons.delete_outline),
-                              label: const _ButtonLabel('Xóa'),
+                              label: compact
+                                  ? Transform.translate(
+                                      offset: const Offset(0, 1),
+                                      child: const _ButtonLabel('Xóa'),
+                                    )
+                                  : const _ButtonLabel('Xóa'),
                             ),
                           ),
                           const SizedBox(width: 8),
@@ -11788,14 +12644,17 @@ class _CopiedAtLabel extends StatelessWidget {
           ),
           const SizedBox(width: 7),
           Flexible(
-            child: Text(
-              _copyTimeLabel(value),
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              style: Theme.of(context).textTheme.labelLarge?.copyWith(
-                color: colorScheme.onSecondaryContainer,
-                height: 1,
-                fontWeight: FontWeight.w700,
+            child: Transform.translate(
+              offset: Offset(0, compact ? 0 : -1),
+              child: Text(
+                _copyTimeLabel(value),
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: Theme.of(context).textTheme.labelLarge?.copyWith(
+                  color: colorScheme.onSecondaryContainer,
+                  height: 1,
+                  fontWeight: FontWeight.w700,
+                ),
               ),
             ),
           ),
@@ -11959,66 +12818,72 @@ class _TagEditorDialogState extends State<_TagEditorDialog> {
       colorValue: _selectedColorValue,
       iconKey: _selectedIconKey,
     );
+    final dialogContentWidth = math.min(
+      620.0,
+      math.max(280.0, MediaQuery.sizeOf(context).width - 64),
+    );
     return AlertDialog(
       title: Text(widget.libraryOnly ? 'Thư viện thẻ' : 'Gắn thẻ'),
       titlePadding: const EdgeInsets.fromLTRB(20, 16, 20, 8),
       contentPadding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
       actionsPadding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
       buttonPadding: const EdgeInsets.symmetric(horizontal: 4),
-      content: ConstrainedBox(
-        constraints: BoxConstraints(
-          maxWidth: 620,
-          maxHeight: math.min(MediaQuery.sizeOf(context).height * 0.72, 640),
-        ),
-        child: SingleChildScrollView(
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              if (!widget.libraryOnly) ...[
+      content: SizedBox(
+        width: dialogContentWidth,
+        child: ConstrainedBox(
+          constraints: BoxConstraints(
+            maxHeight: math.min(MediaQuery.sizeOf(context).height * 0.72, 640),
+          ),
+          child: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                if (!widget.libraryOnly) ...[
+                  _TagEditorSection(
+                    title: 'Đang gắn',
+                    child: _selectedTags.isEmpty
+                        ? Text(
+                            'Chưa có thẻ',
+                            style: Theme.of(context).textTheme.bodyMedium
+                                ?.copyWith(color: colorScheme.onSurfaceVariant),
+                          )
+                        : _ResponsiveTagChipGrid(
+                            itemCount: _selectedTags.length,
+                            minItemWidth: 112,
+                            itemBuilder: (context, index, maxWidth) {
+                              final tag = _selectedTags.elementAt(index);
+                              return _AttachedTagChip(
+                                label: tag,
+                                definition: _definitions[tag],
+                                maxButtonWidth: math.max(72, maxWidth - 36),
+                                onPressed: () => _pickTagForEditing(tag),
+                                onDeleted: () {
+                                  setState(() => _selectedTags.remove(tag));
+                                },
+                              );
+                            },
+                          ),
+                  ),
+                  const SizedBox(height: 8),
+                ],
                 _TagEditorSection(
-                  title: 'Đang gắn',
-                  child: _selectedTags.isEmpty
+                  title: 'Thư viện thẻ',
+                  child: _allTags.isEmpty
                       ? Text(
                           'Chưa có thẻ',
                           style: Theme.of(context).textTheme.bodyMedium
                               ?.copyWith(color: colorScheme.onSurfaceVariant),
                         )
-                      : Wrap(
-                          spacing: 8,
-                          runSpacing: 8,
-                          children: [
-                            for (final tag in _selectedTags)
-                              _AttachedTagChip(
-                                label: tag,
-                                definition: _definitions[tag],
-                                onPressed: () => _pickTagForEditing(tag),
-                                onDeleted: () {
-                                  setState(() => _selectedTags.remove(tag));
-                                },
-                              ),
-                          ],
-                        ),
-                ),
-                const SizedBox(height: 8),
-              ],
-              _TagEditorSection(
-                title: 'Thư viện thẻ',
-                child: _allTags.isEmpty
-                    ? Text(
-                        'Chưa có thẻ',
-                        style: Theme.of(context).textTheme.bodyMedium?.copyWith(
-                          color: colorScheme.onSurfaceVariant,
-                        ),
-                      )
-                    : Wrap(
-                        spacing: 8,
-                        runSpacing: 8,
-                        children: [
-                          for (final tag in _allTags)
-                            _TagLibraryChip(
+                      : _ResponsiveTagChipGrid(
+                          itemCount: _allTags.length,
+                          minItemWidth: 132,
+                          itemBuilder: (context, index, maxWidth) {
+                            final tag = _allTags[index];
+                            return _TagLibraryChip(
                               label: tag,
                               definition: _definitions[tag],
+                              maxButtonWidth: math.max(72, maxWidth - 70),
                               selected:
                                   !widget.libraryOnly &&
                                   _selectedTags.contains(tag),
@@ -12037,111 +12902,127 @@ class _TagEditorDialogState extends State<_TagEditorDialog> {
                               },
                               onEdit: () => _pickTagForEditing(tag),
                               onDelete: () => _deleteTag(tag),
+                            );
+                          },
+                        ),
+                ),
+                const SizedBox(height: 8),
+                _TagEditorSection(
+                  title: 'Tạo/Sửa thẻ',
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      _TagBadge(
+                        label: previewName,
+                        definition: previewDefinition,
+                      ),
+                      const SizedBox(height: 10),
+                      LayoutBuilder(
+                        builder: (context, constraints) {
+                          final availableWidth = constraints.maxWidth.isFinite
+                              ? constraints.maxWidth
+                              : MediaQuery.sizeOf(context).width - 72;
+                          final showFullButton = availableWidth >= 360;
+                          return Row(
+                            crossAxisAlignment: CrossAxisAlignment.center,
+                            children: [
+                              Expanded(
+                                child: TextField(
+                                  controller: _controller,
+                                  textInputAction: TextInputAction.done,
+                                  onSubmitted: (_) => _addOrUpdateTag(),
+                                  decoration: const InputDecoration(
+                                    labelText: 'Tên thẻ',
+                                    hintText: 'cong-viec, sync',
+                                  ),
+                                ),
+                              ),
+                              const SizedBox(width: 8),
+                              Tooltip(
+                                message: 'Thêm/Cập nhật',
+                                child: showFullButton
+                                    ? FilledButton.tonalIcon(
+                                        onPressed: _addOrUpdateTag,
+                                        icon: const Icon(Icons.add),
+                                        label: const _ButtonLabel(
+                                          'Thêm/Cập nhật',
+                                        ),
+                                      )
+                                    : IconButton.filledTonal(
+                                        onPressed: _addOrUpdateTag,
+                                        icon: const Icon(Icons.add),
+                                      ),
+                              ),
+                            ],
+                          );
+                        },
+                      ),
+                      const SizedBox(height: 10),
+                      Wrap(
+                        spacing: 8,
+                        runSpacing: 8,
+                        children: [
+                          for (final colorValue in _tagColorOptions)
+                            _TagColorButton(
+                              color: Color(colorValue),
+                              selected:
+                                  _opaqueColorValue(_selectedColorValue) ==
+                                  _opaqueColorValue(colorValue),
+                              onTap: () => _setSelectedColor(Color(colorValue)),
                             ),
                         ],
                       ),
-              ),
-              const SizedBox(height: 8),
-              _TagEditorSection(
-                title: 'Thiết kế thẻ',
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Wrap(
-                      spacing: 10,
-                      runSpacing: 10,
-                      crossAxisAlignment: WrapCrossAlignment.center,
-                      children: [
-                        _TagBadge(
-                          label: previewName,
-                          definition: previewDefinition,
-                        ),
-                        SizedBox(
-                          width: 260,
-                          child: TextField(
-                            controller: _controller,
-                            textInputAction: TextInputAction.done,
-                            onSubmitted: (_) => _addOrUpdateTag(),
-                            decoration: const InputDecoration(
-                              labelText: 'Tên thẻ',
-                              hintText: 'cong-viec, sync, y-tuong',
-                            ),
-                          ),
-                        ),
-                        FilledButton.tonalIcon(
-                          onPressed: _addOrUpdateTag,
-                          icon: const Icon(Icons.add),
-                          label: const _ButtonLabel('Thêm / cập nhật'),
-                        ),
-                      ],
-                    ),
-                    const SizedBox(height: 10),
-                    Wrap(
-                      spacing: 8,
-                      runSpacing: 8,
-                      children: [
-                        for (final colorValue in _tagColorOptions)
-                          _TagColorButton(
-                            color: Color(colorValue),
-                            selected:
-                                _opaqueColorValue(_selectedColorValue) ==
-                                _opaqueColorValue(colorValue),
-                            onTap: () => _setSelectedColor(Color(colorValue)),
-                          ),
-                      ],
-                    ),
-                    const SizedBox(height: 8),
-                    SizedBox(
-                      width: 260,
-                      child: TextField(
-                        controller: _tagColorController,
-                        textInputAction: TextInputAction.done,
-                        textCapitalization: TextCapitalization.characters,
-                        onSubmitted: (_) => _applyCustomColor(),
-                        decoration: InputDecoration(
-                          isDense: true,
-                          labelText: 'Màu tùy chỉnh',
-                          hintText: '#7C3AED',
-                          prefixIcon: Padding(
-                            padding: const EdgeInsets.all(12),
-                            child: DecoratedBox(
-                              decoration: BoxDecoration(
-                                color: Color(_selectedColorValue),
-                                shape: BoxShape.circle,
-                                border: Border.all(
-                                  color: colorScheme.outlineVariant,
+                      const SizedBox(height: 8),
+                      LayoutBuilder(
+                        builder: (context, constraints) {
+                          final maxWidth = constraints.maxWidth.isFinite
+                              ? constraints.maxWidth
+                              : 320.0;
+                          return SizedBox(
+                            width: math.min(maxWidth, 360),
+                            child: TextField(
+                              controller: _tagColorController,
+                              textInputAction: TextInputAction.done,
+                              textCapitalization: TextCapitalization.characters,
+                              onSubmitted: (_) => _applyCustomColor(),
+                              decoration: InputDecoration(
+                                isDense: true,
+                                labelText: 'Màu tùy chỉnh',
+                                hintText: '#7C3AED',
+                                prefixIcon: Padding(
+                                  padding: const EdgeInsets.all(12),
+                                  child: DecoratedBox(
+                                    decoration: BoxDecoration(
+                                      color: Color(_selectedColorValue),
+                                      shape: BoxShape.circle,
+                                      border: Border.all(
+                                        color: colorScheme.outlineVariant,
+                                      ),
+                                    ),
+                                  ),
+                                ),
+                                suffixIcon: IconButton(
+                                  tooltip: 'Áp dụng màu',
+                                  onPressed: _applyCustomColor,
+                                  icon: const Icon(Icons.check),
                                 ),
                               ),
                             ),
-                          ),
-                          suffixIcon: IconButton(
-                            tooltip: 'Áp dụng màu',
-                            onPressed: _applyCustomColor,
-                            icon: const Icon(Icons.check),
-                          ),
-                        ),
+                          );
+                        },
                       ),
-                    ),
-                    const SizedBox(height: 6),
-                    Wrap(
-                      spacing: 8,
-                      runSpacing: 8,
-                      children: [
-                        for (final option in _tagIconOptions)
-                          IconButton.filledTonal(
-                            isSelected: _selectedIconKey == option.key,
-                            tooltip: option.key,
-                            onPressed: () {
-                              setState(() => _selectedIconKey = option.key);
-                            },
-                            icon: Icon(option.icon),
-                          ),
-                      ],
-                    ),
-                  ],
+                      const SizedBox(height: 8),
+                      _ResponsiveTagIconGrid(
+                        selectedIconKey: _selectedIconKey,
+                        onSelected: (key) {
+                          setState(() => _selectedIconKey = key);
+                        },
+                      ),
+                    ],
+                  ),
                 ),
-              ),
-            ],
+              ],
+            ),
           ),
         ),
       ),
@@ -12164,6 +13045,87 @@ class _TagEditorDialogState extends State<_TagEditorDialog> {
           child: const _ButtonLabel('Lưu'),
         ),
       ],
+    );
+  }
+}
+
+class _ResponsiveTagChipGrid extends StatelessWidget {
+  const _ResponsiveTagChipGrid({
+    required this.itemCount,
+    required this.itemBuilder,
+    this.minItemWidth = 152,
+  });
+
+  final int itemCount;
+  final double minItemWidth;
+  final Widget Function(BuildContext context, int index, double maxWidth)
+  itemBuilder;
+
+  @override
+  Widget build(BuildContext context) {
+    const spacing = 8.0;
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final width = constraints.maxWidth.isFinite
+            ? constraints.maxWidth
+            : MediaQuery.sizeOf(context).width - 72;
+        final maxItemWidth = math.max(minItemWidth, width);
+        return Wrap(
+          spacing: spacing,
+          runSpacing: spacing,
+          children: [
+            for (var index = 0; index < itemCount; index++)
+              ConstrainedBox(
+                constraints: BoxConstraints(maxWidth: maxItemWidth),
+                child: itemBuilder(context, index, maxItemWidth),
+              ),
+          ],
+        );
+      },
+    );
+  }
+}
+
+class _ResponsiveTagIconGrid extends StatelessWidget {
+  const _ResponsiveTagIconGrid({
+    required this.selectedIconKey,
+    required this.onSelected,
+  });
+
+  final String selectedIconKey;
+  final ValueChanged<String> onSelected;
+
+  @override
+  Widget build(BuildContext context) {
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        final width = constraints.maxWidth.isFinite
+            ? constraints.maxWidth
+            : MediaQuery.sizeOf(context).width - 72;
+        const spacing = 8.0;
+        final columns = math
+            .max(4, math.min(8, ((width + spacing) / 48).floor()))
+            .toInt();
+        final itemWidth = (width - spacing * (columns - 1)) / columns;
+        return Wrap(
+          spacing: spacing,
+          runSpacing: spacing,
+          children: [
+            for (final option in _tagIconOptions)
+              SizedBox(
+                width: itemWidth,
+                child: Center(
+                  child: IconButton.filledTonal(
+                    isSelected: selectedIconKey == option.key,
+                    tooltip: option.key,
+                    onPressed: () => onSelected(option.key),
+                    icon: Icon(option.icon),
+                  ),
+                ),
+              ),
+          ],
+        );
+      },
     );
   }
 }
@@ -12217,12 +13179,14 @@ class _AttachedTagChip extends StatelessWidget {
     required this.definition,
     required this.onPressed,
     required this.onDeleted,
+    this.maxButtonWidth = 190,
   });
 
   final String label;
   final TagDefinition? definition;
   final VoidCallback onPressed;
   final VoidCallback onDeleted;
+  final double maxButtonWidth;
 
   @override
   Widget build(BuildContext context) {
@@ -12244,6 +13208,7 @@ class _AttachedTagChip extends StatelessWidget {
           borderRadius: const BorderRadius.horizontal(
             left: Radius.circular(20),
           ),
+          maxWidth: maxButtonWidth,
           onTap: onPressed,
         ),
         _TagGroupDivider(color: tagColor.withValues(alpha: 0.36)),
@@ -12270,6 +13235,7 @@ class _TagLibraryChip extends StatelessWidget {
     required this.onSelected,
     required this.onEdit,
     required this.onDelete,
+    this.maxButtonWidth = 190,
   });
 
   final String label;
@@ -12278,6 +13244,7 @@ class _TagLibraryChip extends StatelessWidget {
   final ValueChanged<bool> onSelected;
   final VoidCallback onEdit;
   final VoidCallback onDelete;
+  final double maxButtonWidth;
 
   @override
   Widget build(BuildContext context) {
@@ -12309,6 +13276,7 @@ class _TagLibraryChip extends StatelessWidget {
           borderRadius: const BorderRadius.horizontal(
             left: Radius.circular(20),
           ),
+          maxWidth: maxButtonWidth,
           onTap: () => onSelected(!selected),
         ),
         _TagGroupDivider(color: borderColor),
@@ -12379,6 +13347,7 @@ class _TagGroupButton extends StatelessWidget {
     required this.foregroundColor,
     required this.borderRadius,
     required this.onTap,
+    this.maxWidth = 190,
   });
 
   final String label;
@@ -12388,6 +13357,7 @@ class _TagGroupButton extends StatelessWidget {
   final Color foregroundColor;
   final BorderRadius borderRadius;
   final VoidCallback onTap;
+  final double maxWidth;
 
   @override
   Widget build(BuildContext context) {
@@ -12398,7 +13368,7 @@ class _TagGroupButton extends StatelessWidget {
         mouseCursor: SystemMouseCursors.click,
         onTap: onTap,
         child: ConstrainedBox(
-          constraints: const BoxConstraints(minHeight: 34, maxWidth: 190),
+          constraints: BoxConstraints(minHeight: 34, maxWidth: maxWidth),
           child: Padding(
             padding: const EdgeInsets.symmetric(horizontal: 10),
             child: Row(
@@ -12713,16 +13683,18 @@ class _AddPeerDialogState extends State<_AddPeerDialog> {
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
-              TextField(
-                controller: _pairPayloadController,
-                maxLines: 2,
-                decoration: InputDecoration(
-                  labelText: 'Payload pairing',
-                  hintText: 'Dán opencb://pair?... từ máy kia',
-                  border: const OutlineInputBorder(),
-                  errorText: _payloadError,
+              SizedBox(
+                height: 44,
+                child: TextField(
+                  controller: _pairPayloadController,
+                  maxLines: 1,
+                  decoration: _compactRoundedInputDecoration(
+                    context,
+                    labelText: 'Payload pairing',
+                    hintText: 'Dán opencb://pair?... từ máy kia',
+                  ).copyWith(errorText: _payloadError),
+                  onSubmitted: (_) => _applyPairPayload(),
                 ),
-                onSubmitted: (_) => _applyPairPayload(),
               ),
               const SizedBox(height: 10),
               Align(
@@ -12740,7 +13712,7 @@ class _AddPeerDialogState extends State<_AddPeerDialog> {
                       OutlinedButton.icon(
                         onPressed: _scanQrPayload,
                         icon: const Icon(Icons.qr_code_scanner),
-                        label: const _ButtonLabel('Quét QR'),
+                        label: const _OffsetButtonLabel('Quét QR', y: 1),
                       ),
                   ],
                 ),
@@ -12870,7 +13842,10 @@ class _ConfirmDiscoveredPeerDialogState
               OutlinedButton.icon(
                 onPressed: _scanQr,
                 icon: const Icon(Icons.qr_code_scanner),
-                label: const _ButtonLabel('Quét QR thay vì nhập mã'),
+                label: const _OffsetButtonLabel(
+                  'Quét QR thay vì nhập mã',
+                  y: 1,
+                ),
               ),
             ],
           ],
@@ -12883,7 +13858,7 @@ class _ConfirmDiscoveredPeerDialogState
         ),
         FilledButton(
           onPressed: _submitCode,
-          child: const _ButtonLabel('Kết nối'),
+          child: const _OffsetButtonLabel('Kết nối', y: 1),
         ),
       ],
     );
@@ -12928,16 +13903,52 @@ class _PairQrScannerDialogState extends State<_PairQrScannerDialog> {
 
   @override
   Widget build(BuildContext context) {
+    final colorScheme = Theme.of(context).colorScheme;
+    final dialogWidth = math.min(
+      math.max(MediaQuery.sizeOf(context).width - 88, 220.0),
+      360.0,
+    );
     return AlertDialog(
       title: const Text('Quét QR pairing'),
-      content: SizedBox(
-        width: 360,
-        height: 360,
-        child: ClipRRect(
-          borderRadius: BorderRadius.circular(16),
-          child: MobileScanner(
-            controller: _controller,
-            onDetect: _handleDetect,
+      contentPadding: const EdgeInsets.fromLTRB(24, 16, 24, 8),
+      content: SizedBox.square(
+        dimension: dialogWidth,
+        child: DecoratedBox(
+          decoration: ShapeDecoration(
+            color: colorScheme.surfaceContainerHighest,
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(22),
+              side: BorderSide(
+                color: colorScheme.primary.withValues(alpha: 0.36),
+                width: 1.5,
+              ),
+            ),
+          ),
+          child: Padding(
+            padding: const EdgeInsets.all(8),
+            child: ClipRRect(
+              borderRadius: BorderRadius.circular(16),
+              child: Stack(
+                fit: StackFit.expand,
+                children: [
+                  MobileScanner(
+                    controller: _controller,
+                    onDetect: _handleDetect,
+                  ),
+                  IgnorePointer(
+                    child: DecoratedBox(
+                      decoration: BoxDecoration(
+                        borderRadius: BorderRadius.circular(16),
+                        border: Border.all(
+                          color: colorScheme.primary.withValues(alpha: 0.72),
+                          width: 2,
+                        ),
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
           ),
         ),
       ),
@@ -13051,9 +14062,7 @@ class _FileTransferPage extends StatelessWidget {
       trailing: Row(
         mainAxisSize: MainAxisSize.min,
         children: [
-          _MiniChip(label: '${peers.length} online', timeTone: true),
-          if (peers.length > 1) ...[
-            const SizedBox(width: 8),
+          if (peers.length > 1)
             TextButton(
               onPressed: onToggleAllPeers,
               child: Text(
@@ -13062,7 +14071,6 @@ class _FileTransferPage extends StatelessWidget {
                     : 'Tất cả',
               ),
             ),
-          ],
         ],
       ),
       child: Column(
@@ -13106,7 +14114,7 @@ class _FileTransferPage extends StatelessWidget {
       ),
     );
     return ListView(
-      padding: EdgeInsets.fromLTRB(20, 14, 20, mobile ? 104 : 20),
+      padding: EdgeInsets.fromLTRB(20, 0, 20, mobile ? 104 : 20),
       children: [
         if (!lanSyncEnabled) ...[
           const _FileTransferNotice(
@@ -13426,6 +14434,13 @@ class _FileTransferDropZone extends StatelessWidget {
         : Platform.isAndroid
         ? 'Thêm file khác vào danh sách gửi.'
         : 'Thêm file hoặc folder khác vào danh sách gửi.';
+    final pickButtonStyle = OutlinedButton.styleFrom(
+      fixedSize: const Size.fromHeight(40),
+      minimumSize: const Size(0, 40),
+      visualDensity: VisualDensity.standard,
+      padding: const EdgeInsets.symmetric(horizontal: 12),
+      textStyle: Theme.of(context).textTheme.labelLarge?.copyWith(height: 1.0),
+    );
     final content = AnimatedContainer(
       duration: const Duration(milliseconds: 180),
       curve: Curves.easeOutCubic,
@@ -13449,16 +14464,6 @@ class _FileTransferDropZone extends StatelessWidget {
             Row(
               crossAxisAlignment: CrossAxisAlignment.center,
               children: [
-                OutlinedButton.icon(
-                  onPressed: onPickFiles,
-                  icon: const Icon(Icons.attach_file, size: 18),
-                  label: const Text('Chọn file'),
-                  style: OutlinedButton.styleFrom(
-                    visualDensity: VisualDensity.compact,
-                    padding: const EdgeInsets.symmetric(horizontal: 12),
-                  ),
-                ),
-                const SizedBox(width: 10),
                 Expanded(
                   child: Text(
                     description,
@@ -13468,6 +14473,13 @@ class _FileTransferDropZone extends StatelessWidget {
                       color: colorScheme.onSurfaceVariant,
                     ),
                   ),
+                ),
+                const SizedBox(width: 10),
+                OutlinedButton.icon(
+                  onPressed: onPickFiles,
+                  icon: const Icon(Icons.attach_file, size: 18),
+                  label: const _OffsetButtonLabel('Chọn file', y: 1),
+                  style: pickButtonStyle,
                 ),
               ],
             )
@@ -13498,13 +14510,15 @@ class _FileTransferDropZone extends StatelessWidget {
                 OutlinedButton.icon(
                   onPressed: onPickFiles,
                   icon: const Icon(Icons.attach_file),
-                  label: const Text('Chọn file'),
+                  label: const _OffsetButtonLabel('Chọn file', y: 1),
+                  style: pickButtonStyle,
                 ),
                 if (!Platform.isAndroid)
                   OutlinedButton.icon(
                     onPressed: onPickFolder,
                     icon: const Icon(Icons.folder_open),
-                    label: const Text('Chọn folder'),
+                    label: const _ButtonLabel('Chọn folder'),
+                    style: pickButtonStyle,
                   ),
               ],
             ),
@@ -13659,9 +14673,16 @@ class _FileTransferPeerTile extends StatelessWidget {
         onTap: onToggle,
         mouseCursor: SystemMouseCursors.click,
         leading: CircleAvatar(
-          backgroundColor: colorScheme.surfaceContainerLow,
-          foregroundColor: colorScheme.onSurfaceVariant,
-          child: Icon(selected ? Icons.check : Icons.devices_other),
+          backgroundColor: selected
+              ? colorScheme.primaryContainer
+              : Color.alphaBlend(
+                  colorScheme.primary.withValues(alpha: 0.10),
+                  colorScheme.surfaceContainerHigh,
+                ),
+          foregroundColor: selected
+              ? colorScheme.onPrimaryContainer
+              : colorScheme.primary,
+          child: const Icon(Icons.devices_other),
         ),
         title: Text(peer.name, maxLines: 1, overflow: TextOverflow.ellipsis),
         subtitle: Text(
@@ -13745,6 +14766,15 @@ class _FileTransferRecordTile extends StatelessWidget {
               value: transfer.progress,
               minHeight: 7,
               backgroundColor: colorScheme.surfaceContainerHighest,
+              color: switch (transfer.status) {
+                FileTransferStatus.failed => colorScheme.error,
+                FileTransferStatus.rejected ||
+                FileTransferStatus.canceled => colorScheme.tertiary,
+                FileTransferStatus.completed => colorScheme.primary,
+                FileTransferStatus.waiting ||
+                FileTransferStatus.sending ||
+                FileTransferStatus.receiving => colorScheme.secondary,
+              },
             ),
           ),
           const SizedBox(height: 5),
@@ -13900,7 +14930,7 @@ class _DevicesPage extends StatelessWidget {
     return Material(
       color: colorScheme.surfaceContainerLowest,
       child: ListView(
-        padding: EdgeInsets.fromLTRB(24, 24, 24, mobile ? 112 : 24),
+        padding: EdgeInsets.fromLTRB(24, 0, 24, mobile ? 112 : 24),
         children: [
           LayoutBuilder(
             builder: (context, constraints) {
@@ -13986,31 +15016,55 @@ class _PairingActionsCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final colorScheme = Theme.of(context).colorScheme;
+    final scanQr = onScanPairQr;
     final actionButtons = Row(
       mainAxisSize: MainAxisSize.min,
       children: [
-        FilledButton.tonalIcon(
-          onPressed: onAddPeer,
-          icon: const Icon(Icons.keyboard_alt_outlined),
-          label: const _ButtonLabel('Nhập payload'),
-        ),
-        if (onScanPairQr != null) ...[
-          const SizedBox(width: 8),
-          OutlinedButton.icon(
-            onPressed: onScanPairQr,
+        if (scanQr == null)
+          FilledButton.tonalIcon(
+            onPressed: onAddPeer,
+            icon: const Icon(Icons.keyboard_alt_outlined),
+            label: const _ButtonLabel('Nhập payload'),
+          )
+        else
+          FilledButton.tonalIcon(
+            onPressed: scanQr,
             icon: const Icon(Icons.qr_code_scanner),
-            label: const _ButtonLabel('Quét QR'),
+            label: const _OffsetButtonLabel('Quét QR', y: 1),
           ),
-        ],
       ],
     );
-    return _SettingsCard(
-      icon: Icons.add_link,
-      title: 'Ghép thiết bị mới',
-      subtitle: '',
-      trailing: actionButtons,
-      inlineTrailingOnCompact: onScanPairQr == null,
-      child: const SizedBox.shrink(),
+    return Card.filled(
+      margin: EdgeInsets.zero,
+      color: colorScheme.surfaceContainerLow,
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+        child: Row(
+          children: [
+            Icon(Icons.add_link, color: colorScheme.primary),
+            const SizedBox(width: 10),
+            Expanded(
+              child: Text(
+                'Ghép thiết bị mới',
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: Theme.of(
+                  context,
+                ).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w800),
+              ),
+            ),
+            const SizedBox(width: 10),
+            Flexible(
+              flex: 0,
+              child: Align(
+                alignment: Alignment.centerRight,
+                child: actionButtons,
+              ),
+            ),
+          ],
+        ),
+      ),
     );
   }
 }
@@ -14041,7 +15095,7 @@ class _TrustedDevicesCard extends StatelessWidget {
       icon: Icons.verified_user_outlined,
       title: 'Thiết bị đã ghép',
       subtitle: '',
-      trailing: _MiniChip(label: '${peers.length} thiết bị'),
+      trailing: _MiniChip(label: '${peers.length} thiết bị', labelYOffset: 0),
       child: peers.isEmpty
           ? Container(
               width: double.infinity,
@@ -14100,6 +15154,95 @@ class _TrustedDevicesCard extends StatelessWidget {
   }
 }
 
+class _SettingsPageSlideSwitcher extends StatefulWidget {
+  const _SettingsPageSlideSwitcher({
+    required this.showUpdatePage,
+    required this.mainPage,
+    required this.updatePage,
+  });
+
+  final bool showUpdatePage;
+  final Widget mainPage;
+  final Widget updatePage;
+
+  @override
+  State<_SettingsPageSlideSwitcher> createState() =>
+      _SettingsPageSlideSwitcherState();
+}
+
+class _SettingsPageSlideSwitcherState extends State<_SettingsPageSlideSwitcher>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _controller;
+  late final Animation<double> _curve;
+
+  @override
+  void initState() {
+    super.initState();
+    _controller = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 390),
+      reverseDuration: const Duration(milliseconds: 340),
+      value: widget.showUpdatePage ? 1 : 0,
+    );
+    _curve = CurvedAnimation(
+      parent: _controller,
+      curve: Curves.easeOutCubic,
+      reverseCurve: Curves.easeInCubic,
+    );
+  }
+
+  @override
+  void didUpdateWidget(covariant _SettingsPageSlideSwitcher oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (widget.showUpdatePage == oldWidget.showUpdatePage) return;
+    if (widget.showUpdatePage) {
+      _controller.forward();
+    } else {
+      _controller.reverse();
+    }
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return ClipRect(
+      child: AnimatedBuilder(
+        animation: _curve,
+        builder: (context, _) {
+          final value = _curve.value;
+          return Stack(
+            fit: StackFit.expand,
+            children: [
+              FractionalTranslation(
+                translation: Offset(-0.12 * value, 0),
+                child: Opacity(
+                  opacity: 1 - (0.08 * value),
+                  child: IgnorePointer(
+                    ignoring: value > 0.02,
+                    child: widget.mainPage,
+                  ),
+                ),
+              ),
+              FractionalTranslation(
+                translation: Offset(1 - value, 0),
+                child: IgnorePointer(
+                  ignoring: value < 0.98,
+                  child: widget.updatePage,
+                ),
+              ),
+            ],
+          );
+        },
+      ),
+    );
+  }
+}
+
 class _SettingsPage extends StatelessWidget {
   const _SettingsPage({
     required this.capturePaused,
@@ -14123,6 +15266,7 @@ class _SettingsPage extends StatelessWidget {
     this.onOpenAndroidNotificationSettings,
     this.onToggleAndroidBatteryOptimizationBypass,
     this.onOpenDevices,
+    required this.onOpenUpdates,
   });
 
   final bool capturePaused;
@@ -14146,6 +15290,7 @@ class _SettingsPage extends StatelessWidget {
   final VoidCallback? onOpenAndroidNotificationSettings;
   final ValueChanged<bool>? onToggleAndroidBatteryOptimizationBypass;
   final VoidCallback? onOpenDevices;
+  final VoidCallback onOpenUpdates;
 
   @override
   Widget build(BuildContext context) {
@@ -14154,8 +15299,13 @@ class _SettingsPage extends StatelessWidget {
     return Material(
       color: colorScheme.surfaceContainerLowest,
       child: ListView(
-        padding: EdgeInsets.fromLTRB(24, 24, 24, mobile ? 112 : 24),
+        padding: EdgeInsets.fromLTRB(24, 0, 24, mobile ? 112 : 24),
         children: [
+          _AppUpdateSummaryCard(
+            versionLabel: _appVersionLabel,
+            onTap: onOpenUpdates,
+          ),
+          const SizedBox(height: 16),
           if (onOpenDevices != null) ...[
             _SettingsNavigationRow(
               icon: Icons.devices_other_outlined,
@@ -14183,13 +15333,6 @@ class _SettingsPage extends StatelessWidget {
                 onToggleAndroidBatteryOptimizationBypass:
                     onToggleAndroidBatteryOptimizationBypass,
               );
-              Widget buildStorageToolsPanel() => _StorageToolsPanel(
-                storagePath: storagePath,
-                onOpenDataDirectory: onOpenDataDirectory,
-                onExportBackup: onExportBackup,
-                onRestoreBackup: onRestoreBackup,
-                onResetClipboardHistory: onResetClipboardHistory,
-              );
               Widget buildThemeSettingsPanel() => _ThemeSettingsPanel(
                 themeMode: themeMode,
                 selectedPreset: themePreset,
@@ -14198,21 +15341,13 @@ class _SettingsPage extends StatelessWidget {
               );
 
               final leftColumn = buildClipboardSettingsPanel();
-              final rightColumn = Column(
-                children: [
-                  buildThemeSettingsPanel(),
-                  const SizedBox(height: 16),
-                  buildStorageToolsPanel(),
-                ],
-              );
+              final rightColumn = buildThemeSettingsPanel();
               if (constraints.maxWidth < 900) {
                 return Column(
                   children: [
                     buildThemeSettingsPanel(),
                     const SizedBox(height: 16),
                     buildClipboardSettingsPanel(),
-                    const SizedBox(height: 16),
-                    buildStorageToolsPanel(),
                   ],
                 );
               }
@@ -14232,6 +15367,451 @@ class _SettingsPage extends StatelessWidget {
   }
 }
 
+class _AppUpdateSummaryCard extends StatelessWidget {
+  const _AppUpdateSummaryCard({
+    required this.versionLabel,
+    required this.onTap,
+  });
+
+  final String versionLabel;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final colorScheme = Theme.of(context).colorScheme;
+    return Card.filled(
+      margin: EdgeInsets.zero,
+      color: colorScheme.surfaceContainerLow,
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(12),
+        mouseCursor: SystemMouseCursors.click,
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(14, 12, 12, 12),
+          child: Row(
+            children: [
+              const _OpenCbLogoMark(size: 42),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      'OpenCB $versionLabel',
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                        fontWeight: FontWeight.w800,
+                      ),
+                    ),
+                    const SizedBox(height: 2),
+                    Text(
+                      'Nhấn vào để mở cài đặt cập nhật',
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                        color: colorScheme.onSurfaceVariant,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(width: 8),
+              Icon(Icons.chevron_right, color: colorScheme.onSurfaceVariant),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _UpdateSettingsPage extends StatelessWidget {
+  const _UpdateSettingsPage({
+    required this.currentVersion,
+    required this.autoCheckUpdates,
+    required this.checking,
+    required this.latestMessage,
+    required this.onBack,
+    required this.onCheckNow,
+    required this.onToggleAutoCheck,
+    required this.onOpenLandingPage,
+    required this.onOpenGithub,
+  });
+
+  final String currentVersion;
+  final bool autoCheckUpdates;
+  final bool checking;
+  final String? latestMessage;
+  final VoidCallback onBack;
+  final VoidCallback onCheckNow;
+  final ValueChanged<bool> onToggleAutoCheck;
+  final VoidCallback onOpenLandingPage;
+  final VoidCallback onOpenGithub;
+
+  @override
+  Widget build(BuildContext context) {
+    final colorScheme = Theme.of(context).colorScheme;
+    final mobile = MediaQuery.sizeOf(context).width < _mobileLayoutBreakpoint;
+    final pagePadding = EdgeInsets.fromLTRB(24, mobile ? 0 : 18, 24, 24);
+    final content = Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        if (!mobile) ...[
+          Row(
+            children: [
+              IconButton.filledTonal(
+                onPressed: onBack,
+                icon: const Icon(Icons.chevron_left_rounded),
+                tooltip: 'Quay lại',
+              ),
+              const SizedBox(width: 10),
+              Text(
+                'Cập nhật ứng dụng',
+                style: Theme.of(
+                  context,
+                ).textTheme.titleLarge?.copyWith(fontWeight: FontWeight.w800),
+              ),
+            ],
+          ),
+          const SizedBox(height: 16),
+        ],
+        LayoutBuilder(
+          builder: (context, constraints) {
+            final wide = constraints.maxWidth >= 840;
+            final mobileIntro = Card.filled(
+              margin: EdgeInsets.zero,
+              color: colorScheme.surfaceContainerLow,
+              child: Padding(
+                padding: const EdgeInsets.fromLTRB(14, 12, 10, 12),
+                child: Row(
+                  children: [
+                    const _OpenCbLogoMark(size: 44),
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            'OpenCB $currentVersion',
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: Theme.of(context).textTheme.titleMedium
+                                ?.copyWith(fontWeight: FontWeight.w800),
+                          ),
+                          if (latestMessage != null) ...[
+                            const SizedBox(height: 4),
+                            Text(
+                              latestMessage!,
+                              maxLines: 2,
+                              overflow: TextOverflow.ellipsis,
+                              style: Theme.of(context).textTheme.bodySmall
+                                  ?.copyWith(
+                                    color: colorScheme.onSurfaceVariant,
+                                  ),
+                            ),
+                          ],
+                        ],
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    IconButton.filledTonal(
+                      onPressed: checking ? null : onCheckNow,
+                      icon: _DirectorySyncIcon(checking: checking),
+                      tooltip: 'Check cập nhật',
+                    ),
+                  ],
+                ),
+              ),
+            );
+            final desktopIntro = _SettingsCard(
+              icon: Icons.info_outline,
+              title: 'Phiên bản hiện tại',
+              subtitle: '',
+              trailing: FilledButton.tonalIcon(
+                onPressed: checking ? null : onCheckNow,
+                icon: _DirectorySyncIcon(checking: checking),
+                label: _ButtonLabel(checking ? 'Đang check' : 'Check'),
+              ),
+              child: Row(
+                children: [
+                  const _OpenCbLogoMark(size: 44),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          'OpenCB $currentVersion',
+                          style: Theme.of(context).textTheme.titleMedium
+                              ?.copyWith(fontWeight: FontWeight.w800),
+                        ),
+                        if (latestMessage != null) ...[
+                          const SizedBox(height: 4),
+                          Text(
+                            latestMessage!,
+                            style: Theme.of(context).textTheme.bodySmall
+                                ?.copyWith(color: colorScheme.onSurfaceVariant),
+                          ),
+                        ],
+                      ],
+                    ),
+                  ),
+                ],
+              ),
+            );
+            final mobileUpdateControls = Column(
+              children: [
+                _UpdateSettingsSimpleRow(
+                  title: 'Nhắc khi có bản mới',
+                  trailing: IgnorePointer(
+                    child: Switch(
+                      value: autoCheckUpdates,
+                      onChanged: onToggleAutoCheck,
+                    ),
+                  ),
+                  onTap: () => onToggleAutoCheck(!autoCheckUpdates),
+                ),
+                const SizedBox(height: 8),
+                _UpdateSettingsSimpleRow(
+                  title: 'Trang giới thiệu',
+                  onTap: onOpenLandingPage,
+                ),
+                const SizedBox(height: 8),
+                _UpdateSettingsSimpleRow(title: 'GitHub', onTap: onOpenGithub),
+              ],
+            );
+            final desktopUpdateControls = _SettingsCard(
+              icon: Icons.system_update_alt,
+              title: 'Kiểm tra cập nhật',
+              subtitle: '',
+              child: Column(
+                children: [
+                  _SettingsSwitchRow(
+                    icon: Icons.notifications_active_outlined,
+                    title: 'Nhắc khi có bản mới',
+                    subtitle: autoCheckUpdates
+                        ? 'OpenCB tự kiểm tra khi mở app.'
+                        : 'Tắt tự động, vẫn có thể check thủ công.',
+                    value: autoCheckUpdates,
+                    onChanged: onToggleAutoCheck,
+                  ),
+                  const SizedBox(height: 8),
+                  _SettingsNavigationRow(
+                    icon: Icons.public,
+                    title: 'Trang giới thiệu',
+                    subtitle: _landingPageUrl,
+                    onTap: onOpenLandingPage,
+                  ),
+                  const SizedBox(height: 8),
+                  _SettingsNavigationRow(
+                    icon: Icons.code,
+                    title: 'GitHub',
+                    subtitle: _githubRepoUrl,
+                    onTap: onOpenGithub,
+                  ),
+                ],
+              ),
+            );
+            if (mobile) {
+              return Column(
+                children: [
+                  mobileIntro,
+                  const SizedBox(height: 16),
+                  mobileUpdateControls,
+                ],
+              );
+            }
+            if (!wide) {
+              return Column(
+                children: [
+                  desktopIntro,
+                  const SizedBox(height: 16),
+                  desktopUpdateControls,
+                ],
+              );
+            }
+            return Row(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Expanded(flex: 5, child: desktopIntro),
+                const SizedBox(width: 16),
+                Expanded(flex: 6, child: desktopUpdateControls),
+              ],
+            );
+          },
+        ),
+      ],
+    );
+    return Material(
+      color: colorScheme.surfaceContainerLowest,
+      child: ListView(padding: pagePadding, children: [content]),
+    );
+  }
+}
+
+class _UpdateSettingsSimpleRow extends StatelessWidget {
+  const _UpdateSettingsSimpleRow({
+    required this.title,
+    required this.onTap,
+    this.trailing,
+  });
+
+  final String title;
+  final VoidCallback onTap;
+  final Widget? trailing;
+
+  @override
+  Widget build(BuildContext context) {
+    final colorScheme = Theme.of(context).colorScheme;
+    return Material(
+      color: colorScheme.surfaceContainerLow,
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+      child: InkWell(
+        onTap: onTap,
+        borderRadius: BorderRadius.circular(12),
+        mouseCursor: SystemMouseCursors.click,
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(14, 10, 10, 10),
+          child: Row(
+            children: [
+              Expanded(
+                child: Text(
+                  title,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: Theme.of(
+                    context,
+                  ).textTheme.labelLarge?.copyWith(fontWeight: FontWeight.w800),
+                ),
+              ),
+              const SizedBox(width: 10),
+              trailing ??
+                  Icon(
+                    Icons.chevron_right,
+                    color: colorScheme.onSurfaceVariant,
+                  ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+class _DirectorySyncIcon extends StatefulWidget {
+  const _DirectorySyncIcon({required this.checking});
+
+  final bool checking;
+
+  @override
+  State<_DirectorySyncIcon> createState() => _DirectorySyncIconState();
+}
+
+class _DirectorySyncIconState extends State<_DirectorySyncIcon>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _controller;
+
+  @override
+  void initState() {
+    super.initState();
+    _controller = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 900),
+    );
+    if (widget.checking) _controller.repeat();
+  }
+
+  @override
+  void didUpdateWidget(covariant _DirectorySyncIcon oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (widget.checking == oldWidget.checking) return;
+    if (widget.checking) {
+      _controller.repeat();
+    } else {
+      _controller.stop();
+      _controller.value = 0;
+    }
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final color = IconTheme.of(context).color;
+    final icon = CustomPaint(
+      painter: _DirectorySyncIconPainter(color: color ?? Colors.black),
+      size: const Size.square(24),
+    );
+    return SizedBox.square(
+      dimension: 24,
+      child: widget.checking
+          ? RotationTransition(turns: _controller, child: icon)
+          : icon,
+    );
+  }
+}
+
+class _DirectorySyncIconPainter extends CustomPainter {
+  const _DirectorySyncIconPainter({required this.color});
+
+  final Color color;
+
+  @override
+  void paint(Canvas canvas, Size size) {
+    final scale = size.shortestSide / 960;
+    final path = _directorySyncPath();
+    canvas.save();
+    canvas.scale(scale, scale);
+    canvas.drawPath(path, Paint()..color = color);
+    canvas.restore();
+  }
+
+  Path _directorySyncPath() {
+    double y(double value) => value + 960;
+    return Path()
+      ..moveTo(212, y(-239))
+      ..relativeQuadraticBezierTo(-43, -48, -67.5, -110)
+      ..quadraticBezierTo(120, y(-411), 120, y(-480))
+      ..relativeQuadraticBezierTo(0, -150, 105, -255)
+      ..quadraticBezierTo(330, y(-840), 480, y(-840))
+      ..relativeLineTo(0, -80)
+      ..relativeLineTo(200, 150)
+      ..relativeLineTo(-200, 150)
+      ..relativeLineTo(0, -80)
+      ..relativeQuadraticBezierTo(-91, 0, -155.5, 64.5)
+      ..quadraticBezierTo(260, y(-571), 260, y(-480))
+      ..relativeQuadraticBezierTo(0, 46, 17.5, 86)
+      ..quadraticBezierTo(295, y(-354), 325, y(-324))
+      ..relativeLineTo(-113, 85)
+      ..close()
+      ..moveTo(480, y(-40))
+      ..lineTo(280, y(-190))
+      ..relativeLineTo(200, -150)
+      ..relativeLineTo(0, 80)
+      ..relativeQuadraticBezierTo(91, 0, 155.5, -64.5)
+      ..quadraticBezierTo(700, y(-389), 700, y(-480))
+      ..relativeQuadraticBezierTo(0, -46, -17.5, -86)
+      ..quadraticBezierTo(665, y(-606), 635, y(-636))
+      ..relativeLineTo(113, -85)
+      ..relativeQuadraticBezierTo(43, 48, 67.5, 110)
+      ..quadraticBezierTo(840, y(-549), 840, y(-480))
+      ..relativeQuadraticBezierTo(0, 150, -105, 255)
+      ..quadraticBezierTo(630, y(-120), 480, y(-120))
+      ..relativeLineTo(0, 80)
+      ..close();
+  }
+
+  @override
+  bool shouldRepaint(covariant _DirectorySyncIconPainter oldDelegate) {
+    return oldDelegate.color != color;
+  }
+}
+
 class _SettingsCard extends StatelessWidget {
   const _SettingsCard({
     required this.icon,
@@ -14239,7 +15819,6 @@ class _SettingsCard extends StatelessWidget {
     required this.subtitle,
     required this.child,
     this.trailing,
-    this.inlineTrailingOnCompact = false,
   });
 
   final IconData icon;
@@ -14247,7 +15826,6 @@ class _SettingsCard extends StatelessWidget {
   final String subtitle;
   final Widget child;
   final Widget? trailing;
-  final bool inlineTrailingOnCompact;
 
   @override
   Widget build(BuildContext context) {
@@ -14297,7 +15875,7 @@ class _SettingsCard extends StatelessWidget {
                   ],
                 );
                 if (trailing == null) return titleBlock;
-                if (compact && !inlineTrailingOnCompact) {
+                if (compact) {
                   if (trailing is _MiniChip) {
                     return Row(
                       children: [
@@ -14371,146 +15949,6 @@ InputDecoration _compactRoundedInputDecoration(
   );
 }
 
-class _StorageToolsPanel extends StatelessWidget {
-  const _StorageToolsPanel({
-    required this.storagePath,
-    required this.onOpenDataDirectory,
-    required this.onExportBackup,
-    required this.onRestoreBackup,
-    required this.onResetClipboardHistory,
-  });
-
-  final String storagePath;
-  final VoidCallback onOpenDataDirectory;
-  final VoidCallback onExportBackup;
-  final VoidCallback onRestoreBackup;
-  final VoidCallback onResetClipboardHistory;
-
-  @override
-  Widget build(BuildContext context) {
-    final colorScheme = Theme.of(context).colorScheme;
-    return _SettingsCard(
-      icon: Icons.folder_copy_outlined,
-      title: 'Dữ liệu cục bộ',
-      subtitle: '',
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Container(
-            width: double.infinity,
-            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-            decoration: ShapeDecoration(
-              color: colorScheme.surfaceContainer,
-              shape: RoundedRectangleBorder(
-                borderRadius: BorderRadius.circular(12),
-                side: BorderSide(color: colorScheme.outlineVariant),
-              ),
-            ),
-            child: Text(
-              storagePath,
-              maxLines: 2,
-              overflow: TextOverflow.ellipsis,
-              style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                color: colorScheme.onSurfaceVariant,
-              ),
-            ),
-          ),
-          const SizedBox(height: 12),
-          _TwoByTwoActionGrid(
-            children: [
-              _StorageActionButton(
-                filled: true,
-                onPressed: onOpenDataDirectory,
-                icon: Icons.folder_open_outlined,
-                label: 'Mở thư mục',
-              ),
-              _StorageActionButton(
-                onPressed: onExportBackup,
-                icon: Icons.download_outlined,
-                label: 'Tạo backup',
-              ),
-              _StorageActionButton(
-                onPressed: onRestoreBackup,
-                icon: Icons.restore_outlined,
-                label: 'Khôi phục',
-              ),
-              _StorageActionButton(
-                onPressed: onResetClipboardHistory,
-                icon: Icons.delete_sweep_outlined,
-                label: 'Xóa lịch sử',
-              ),
-            ],
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-class _TwoByTwoActionGrid extends StatelessWidget {
-  const _TwoByTwoActionGrid({required this.children});
-
-  final List<Widget> children;
-
-  @override
-  Widget build(BuildContext context) {
-    assert(children.length == 4);
-    return Column(
-      children: [
-        Row(
-          children: [
-            Expanded(child: children[0]),
-            const SizedBox(width: 8),
-            Expanded(child: children[1]),
-          ],
-        ),
-        const SizedBox(height: 8),
-        Row(
-          children: [
-            Expanded(child: children[2]),
-            const SizedBox(width: 8),
-            Expanded(child: children[3]),
-          ],
-        ),
-      ],
-    );
-  }
-}
-
-class _StorageActionButton extends StatelessWidget {
-  const _StorageActionButton({
-    required this.onPressed,
-    required this.icon,
-    required this.label,
-    this.filled = false,
-  });
-
-  final VoidCallback onPressed;
-  final IconData icon;
-  final String label;
-  final bool filled;
-
-  @override
-  Widget build(BuildContext context) {
-    final child = _ButtonLabel(label);
-    return SizedBox(
-      width: double.infinity,
-      height: 40,
-      child: filled
-          ? FilledButton.tonalIcon(
-              onPressed: onPressed,
-              icon: Icon(icon),
-              label: child,
-            )
-          : OutlinedButton.icon(
-              onPressed: onPressed,
-              icon: Icon(icon),
-              label: child,
-            ),
-    );
-  }
-}
-
 class _ThemeSettingsPanel extends StatelessWidget {
   const _ThemeSettingsPanel({
     required this.themeMode,
@@ -14575,13 +16013,16 @@ class _ThemeSettingsPanel extends StatelessWidget {
           const SizedBox(height: 10),
           LayoutBuilder(
             builder: (context, constraints) {
+              final mobile =
+                  MediaQuery.sizeOf(context).width < _mobileLayoutBreakpoint;
+              final compactChips = mobile || Platform.isAndroid;
               const columns = 2;
-              const spacing = 8.0;
+              final spacing = compactChips ? 4.0 : 6.0;
               final chipWidth =
                   (constraints.maxWidth - spacing * (columns - 1)) / columns;
               return Wrap(
                 spacing: spacing,
-                runSpacing: 8,
+                runSpacing: compactChips ? 4 : 6,
                 children: [
                   for (final preset in _m3ThemePresets)
                     SizedBox(
@@ -14589,6 +16030,14 @@ class _ThemeSettingsPanel extends StatelessWidget {
                       child: FilterChip(
                         selected: selectedPreset.id == preset.id,
                         showCheckmark: false,
+                        materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                        visualDensity: compactChips
+                            ? const VisualDensity(horizontal: -2, vertical: -3)
+                            : VisualDensity.standard,
+                        padding: EdgeInsets.symmetric(
+                          horizontal: compactChips ? 6 : 8,
+                          vertical: compactChips ? 2 : 4,
+                        ),
                         avatar: _ThemeSwatch(color: preset.seedColor),
                         label: SizedBox(
                           width: double.infinity,
@@ -14756,8 +16205,7 @@ class _ClipboardSettingsPanelState extends State<_ClipboardSettingsPanel> {
             _SettingsSwitchRow(
               icon: Icons.battery_saver_outlined,
               title: 'Bỏ qua tối ưu pin',
-              subtitle:
-                  'Tùy chọn thêm nếu Sync LAN chưa ổn định khi app chạy nền.',
+              subtitle: 'Tùy chọn thêm nếu Sync LAN chưa ổn định.',
               value: widget.androidIgnoringBatteryOptimizations,
               onChanged: widget.onToggleAndroidBatteryOptimizationBypass!,
             ),
@@ -14768,8 +16216,8 @@ class _ClipboardSettingsPanelState extends State<_ClipboardSettingsPanel> {
               alignment: Alignment.centerLeft,
               child: OutlinedButton.icon(
                 onPressed: widget.onOpenAndroidNotificationSettings,
-                icon: const Icon(Icons.notifications_off_outlined),
-                label: const _ButtonLabel('Ẩn thông báo chạy nền'),
+                icon: const Icon(Icons.notifications_outlined),
+                label: const _OffsetButtonLabel('Cài đặt thông báo', y: 1),
               ),
             ),
           ],
@@ -14818,6 +16266,7 @@ class _ClipboardSettingsPanelState extends State<_ClipboardSettingsPanel> {
           subtitle: '',
           trailing: _MiniChip(
             label: _formatClipboardCount(_pendingRetentionLimit),
+            labelYOffset: 1,
           ),
           child: _RetentionStandardSlider(
             value: retentionValue,
@@ -14835,74 +16284,78 @@ class _ClipboardSettingsPanelState extends State<_ClipboardSettingsPanel> {
             },
           ),
         ),
-        const SizedBox(height: 16),
-        _SettingsCard(
-          icon: Icons.visibility_off_outlined,
-          title: 'Ứng dụng loại trừ',
-          subtitle: 'Không lưu clipboard khi nguồn thuộc danh sách này.',
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Row(
-                children: [
-                  Expanded(
-                    child: TextField(
-                      controller: _excludedSourceController,
-                      decoration: _compactRoundedInputDecoration(
-                        context,
-                        labelText: 'Tên ứng dụng nguồn',
-                        hintText: 'Chrome, 1Password, KeePass...',
+        if (!isAndroid) ...[
+          const SizedBox(height: 16),
+          _SettingsCard(
+            icon: Icons.visibility_off_outlined,
+            title: 'Ứng dụng loại trừ',
+            subtitle: 'Không lưu clipboard khi nguồn thuộc danh sách này.',
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  children: [
+                    Expanded(
+                      child: TextField(
+                        controller: _excludedSourceController,
+                        decoration: _compactRoundedInputDecoration(
+                          context,
+                          labelText: 'Tên ứng dụng nguồn',
+                          hintText: 'Chrome, 1Password, KeePass...',
+                        ),
+                        onSubmitted: _addSource,
                       ),
-                      onSubmitted: _addSource,
                     ),
-                  ),
-                  const SizedBox(width: 10),
-                  FilledButton.tonalIcon(
-                    onPressed: () => _addSource(_excludedSourceController.text),
-                    icon: const Icon(Icons.add),
-                    label: const _ButtonLabel('Thêm'),
+                    const SizedBox(width: 10),
+                    FilledButton.tonalIcon(
+                      onPressed: () =>
+                          _addSource(_excludedSourceController.text),
+                      icon: const Icon(Icons.add),
+                      label: const _ButtonLabel('Thêm'),
+                    ),
+                  ],
+                ),
+                if (widget.sourceSuggestions.isNotEmpty) ...[
+                  const SizedBox(height: 12),
+                  Wrap(
+                    spacing: 8,
+                    runSpacing: 8,
+                    children: [
+                      for (final source in widget.sourceSuggestions)
+                        ActionChip(
+                          avatar: const Icon(Icons.add_circle_outline),
+                          label: Text(source),
+                          onPressed: () => _addSource(source),
+                        ),
+                    ],
                   ),
                 ],
-              ),
-              if (widget.sourceSuggestions.isNotEmpty) ...[
                 const SizedBox(height: 12),
-                Wrap(
-                  spacing: 8,
-                  runSpacing: 8,
-                  children: [
-                    for (final source in widget.sourceSuggestions)
-                      ActionChip(
-                        avatar: const Icon(Icons.add_circle_outline),
-                        label: Text(source),
-                        onPressed: () => _addSource(source),
-                      ),
-                  ],
-                ),
-              ],
-              const SizedBox(height: 12),
-              if (widget.settings.excludedSources.isEmpty)
-                Text(
-                  'Chưa loại trừ ứng dụng nào.',
-                  style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                    color: colorScheme.onSurfaceVariant,
+                if (widget.settings.excludedSources.isEmpty)
+                  Text(
+                    'Chưa loại trừ ứng dụng nào.',
+                    style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                      color: colorScheme.onSurfaceVariant,
+                    ),
+                  )
+                else
+                  Wrap(
+                    spacing: 8,
+                    runSpacing: 8,
+                    children: [
+                      for (final source in widget.settings.excludedSources)
+                        InputChip(
+                          avatar: const Icon(Icons.block),
+                          label: Text(source),
+                          onDeleted: () =>
+                              widget.onRemoveExcludedSource(source),
+                        ),
+                    ],
                   ),
-                )
-              else
-                Wrap(
-                  spacing: 8,
-                  runSpacing: 8,
-                  children: [
-                    for (final source in widget.settings.excludedSources)
-                      InputChip(
-                        avatar: const Icon(Icons.block),
-                        label: Text(source),
-                        onDeleted: () => widget.onRemoveExcludedSource(source),
-                      ),
-                  ],
-                ),
-            ],
+              ],
+            ),
           ),
-        ),
+        ],
       ],
     );
   }
@@ -15312,6 +16765,18 @@ class _ButtonLabel extends StatelessWidget {
   }
 }
 
+class _OffsetButtonLabel extends StatelessWidget {
+  const _OffsetButtonLabel(this.text, {required this.y});
+
+  final String text;
+  final double y;
+
+  @override
+  Widget build(BuildContext context) {
+    return Transform.translate(offset: Offset(0, y), child: _ButtonLabel(text));
+  }
+}
+
 class _FittedOneLineLabel extends StatelessWidget {
   const _FittedOneLineLabel(this.text, {this.minWidth = 42});
 
@@ -15352,6 +16817,7 @@ class _AnimatedFeedbackLabel extends StatelessWidget {
     required this.label,
     required this.successLabel,
     this.color,
+    this.labelYOffset = 0,
   });
 
   final bool showFeedback;
@@ -15359,6 +16825,7 @@ class _AnimatedFeedbackLabel extends StatelessWidget {
   final String label;
   final String successLabel;
   final Color? color;
+  final double labelYOffset;
 
   @override
   Widget build(BuildContext context) {
@@ -15402,6 +16869,7 @@ class _AnimatedFeedbackLabel extends StatelessWidget {
         icon: showFeedback ? Icons.check_circle_outline : icon,
         label: showFeedback ? successLabel : label,
         color: color,
+        labelYOffset: labelYOffset,
       ),
     );
   }
@@ -15413,11 +16881,13 @@ class _FeedbackLabelRow extends StatelessWidget {
     required this.icon,
     required this.label,
     this.color,
+    this.labelYOffset = 0,
   });
 
   final IconData icon;
   final String label;
   final Color? color;
+  final double labelYOffset;
 
   @override
   Widget build(BuildContext context) {
@@ -15432,7 +16902,10 @@ class _FeedbackLabelRow extends StatelessWidget {
       children: [
         Icon(icon, size: 18, color: color),
         const SizedBox(width: 8),
-        Text(label, style: effectiveStyle),
+        Transform.translate(
+          offset: Offset(0, labelYOffset),
+          child: Text(label, style: effectiveStyle),
+        ),
       ],
     );
   }
@@ -15445,6 +16918,7 @@ class _MotionFeedbackButton extends StatefulWidget {
     required this.onPressed,
     this.successLabel = 'Xong',
     this.variant = _MotionFeedbackButtonVariant.outlined,
+    this.labelYOffset = 0,
   });
 
   final IconData icon;
@@ -15452,6 +16926,7 @@ class _MotionFeedbackButton extends StatefulWidget {
   final FutureOr<void> Function()? onPressed;
   final String successLabel;
   final _MotionFeedbackButtonVariant variant;
+  final double labelYOffset;
 
   @override
   State<_MotionFeedbackButton> createState() => _MotionFeedbackButtonState();
@@ -15515,11 +16990,16 @@ class _MotionFeedbackButtonState extends State<_MotionFeedbackButton> {
       icon: widget.icon,
       label: widget.label,
       successLabel: widget.successLabel,
+      labelYOffset: widget.labelYOffset,
     );
   }
 
   Widget _plainContent({required IconData icon, required String label}) {
-    return _FeedbackLabelRow(icon: icon, label: label);
+    return _FeedbackLabelRow(
+      icon: icon,
+      label: label,
+      labelYOffset: widget.labelYOffset,
+    );
   }
 
   Widget _button({
@@ -15798,11 +17278,31 @@ class _LocalDeviceRow extends StatelessWidget {
   Widget build(BuildContext context) {
     final colorScheme = Theme.of(context).colorScheme;
     final hasError = syncError != null;
+    Widget localDeviceBadge({
+      required String label,
+      required IconData icon,
+      required Color color,
+    }) {
+      return _M3Badge(
+        label: label,
+        icon: icon,
+        tone: _M3BadgeTone.primary,
+        horizontalPadding: 8,
+        tightText: true,
+        containerColorOverride: Color.alphaBlend(
+          color.withValues(alpha: 0.10),
+          colorScheme.surfaceContainerHigh,
+        ),
+        contentColorOverride: colorScheme.onSurfaceVariant,
+        iconColorOverride: color,
+        borderColorOverride: color.withValues(alpha: 0.18),
+      );
+    }
+
     return _SettingsCard(
       icon: hasError ? Icons.error_outline : Icons.computer,
       title: 'Thiết bị này',
       subtitle: '',
-      trailing: _MiniChip(label: lanSyncEnabled ? 'Port $syncPort' : 'Tắt'),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
@@ -15854,7 +17354,7 @@ class _LocalDeviceRow extends StatelessWidget {
                 ),
                 const SizedBox(height: 4),
                 Text(
-                  syncError ?? '$syncHost:$syncPort',
+                  syncError ?? syncHost,
                   style: Theme.of(context).textTheme.bodySmall?.copyWith(
                     color: hasError
                         ? colorScheme.onErrorContainer
@@ -15865,25 +17365,28 @@ class _LocalDeviceRow extends StatelessWidget {
             ),
           ),
           const SizedBox(height: 12),
-          Wrap(
-            spacing: 8,
-            runSpacing: 8,
-            children: [
-              _M3Badge(
-                label: identity.pairCode,
-                icon: Icons.key_outlined,
-                tone: _M3BadgeTone.primary,
-              ),
-              _M3Badge(
-                label: lanSyncEnabled ? 'Đang quảng bá LAN' : 'Đã tắt',
-                icon: lanSyncEnabled
-                    ? Icons.wifi_tethering
-                    : Icons.cloud_off_outlined,
-                tone: lanSyncEnabled
-                    ? _M3BadgeTone.selected
-                    : _M3BadgeTone.surface,
-              ),
-            ],
+          LayoutBuilder(
+            builder: (context, constraints) {
+              final compact = constraints.maxWidth < 420;
+              return Wrap(
+                spacing: 8,
+                runSpacing: 8,
+                alignment: compact ? WrapAlignment.center : WrapAlignment.start,
+                crossAxisAlignment: WrapCrossAlignment.center,
+                children: [
+                  localDeviceBadge(
+                    label: identity.pairCode,
+                    icon: Icons.key_outlined,
+                    color: colorScheme.primary,
+                  ),
+                  localDeviceBadge(
+                    label: 'Port $syncPort',
+                    icon: Icons.settings_ethernet,
+                    color: colorScheme.primary,
+                  ),
+                ],
+              );
+            },
           ),
         ],
       ),
@@ -15926,6 +17429,7 @@ class _PairQrCard extends StatelessWidget {
                   label: 'Copy payload',
                   successLabel: 'Copied',
                   variant: _MotionFeedbackButtonVariant.filledTonal,
+                  labelYOffset: 1,
                 ),
               ],
             ),
@@ -16012,7 +17516,7 @@ class _DiscoveredDevicesCard extends StatelessWidget {
       icon: Icons.radar_outlined,
       title: 'Thiết bị đang thấy',
       subtitle: '',
-      trailing: _MiniChip(label: '${devices.length} tìm thấy'),
+      trailing: _MiniChip(label: '${devices.length} tìm thấy', labelYOffset: 0),
       child: Column(
         children: [
           for (final device in devices) ...[
@@ -16076,7 +17580,7 @@ class _DiscoveredDeviceRow extends StatelessWidget {
             final addButton = FilledButton.tonalIcon(
               onPressed: onAdd,
               icon: const Icon(Icons.add_link),
-              label: const _ButtonLabel('Kết nối'),
+              label: const _OffsetButtonLabel('Kết nối', y: 1),
             );
             if (compact) {
               return Column(
@@ -16123,6 +17627,9 @@ class _DeviceRow extends StatelessWidget {
   Widget build(BuildContext context) {
     final colorScheme = Theme.of(context).colorScheme;
     final hasError = peer.lastError != null;
+    final peerErrorText = peer.lastError == null
+        ? null
+        : _friendlySyncError(peer.lastError!);
     final lastSeenAge = discoveredDevice == null
         ? null
         : DateTime.now().difference(discoveredDevice!.lastSeenAt);
@@ -16182,6 +17689,9 @@ class _DeviceRow extends StatelessWidget {
         actionButtons[index],
       ],
     ];
+    final statusBaseColor = !hasError && online
+        ? const Color(0xFF2E7D32)
+        : colorScheme.error;
     final statusBadge = _M3Badge(
       label: hasError
           ? 'Lỗi'
@@ -16191,31 +17701,15 @@ class _DeviceRow extends StatelessWidget {
           ? 'Vừa thấy'
           : 'Offline',
       tone: _M3BadgeTone.surface,
-      icon: hasError
-          ? Icons.error_outline
-          : online
-          ? Icons.check_circle_outline
-          : recentlySeen
-          ? Icons.schedule_outlined
-          : Icons.cloud_off_outlined,
-      containerColorOverride: hasError
-          ? Color.alphaBlend(
-              colorScheme.error.withValues(alpha: 0.12),
-              colorScheme.surfaceContainerHigh,
-            )
-          : online || recentlySeen
-          ? colorScheme.surfaceContainerHigh
-          : null,
-      contentColorOverride: hasError
-          ? colorScheme.error
-          : online || recentlySeen
-          ? colorScheme.onSurfaceVariant
-          : null,
-      iconColorOverride: hasError
-          ? colorScheme.error
-          : online || recentlySeen
-          ? colorScheme.onSurfaceVariant
-          : null,
+      horizontalPadding: 8,
+      tightText: true,
+      containerColorOverride: Color.alphaBlend(
+        statusBaseColor.withValues(alpha: 0.10),
+        colorScheme.surfaceContainerHigh,
+      ),
+      contentColorOverride: statusBaseColor,
+      borderColorOverride: statusBaseColor.withValues(alpha: 0.18),
+      labelYOffset: 0,
     );
     return Container(
       width: double.infinity,
@@ -16263,8 +17757,6 @@ class _DeviceRow extends StatelessWidget {
                         style: const TextStyle(fontWeight: FontWeight.w800),
                       ),
                     ),
-                    const SizedBox(width: 4),
-                    statusBadge,
                   ],
                 ),
               ),
@@ -16281,17 +17773,25 @@ class _DeviceRow extends StatelessWidget {
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               const SizedBox(height: 6),
-              Text(
-                '${peer.endpoint} - ${peer.pairCode}',
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: Theme.of(context).textTheme.bodySmall?.copyWith(
-                  color: colorScheme.onSurfaceVariant,
-                ),
+              Row(
+                children: [
+                  Expanded(
+                    child: Text(
+                      '${peer.endpoint} - ${peer.pairCode}',
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                        color: colorScheme.onSurfaceVariant,
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  statusBadge,
+                ],
               ),
               const SizedBox(height: 2),
               Text(
-                hasError ? 'Lỗi: ${peer.lastError}' : peer.lastSynced,
+                peerErrorText ?? peer.lastSynced,
                 maxLines: compact ? 2 : 1,
                 overflow: TextOverflow.ellipsis,
                 style: Theme.of(context).textTheme.bodySmall?.copyWith(
@@ -16339,8 +17839,6 @@ class _DeviceRow extends StatelessWidget {
                               ),
                             ),
                           ),
-                          const SizedBox(width: 4),
-                          Flexible(child: statusBadge),
                         ],
                       ),
                     ),
@@ -16407,6 +17905,7 @@ class _M3Badge extends StatelessWidget {
     this.borderColorOverride,
     this.horizontalPadding,
     this.tightText = false,
+    this.labelYOffset,
   });
 
   final String label;
@@ -16418,6 +17917,7 @@ class _M3Badge extends StatelessWidget {
   final Color? borderColorOverride;
   final double? horizontalPadding;
   final bool tightText;
+  final double? labelYOffset;
 
   @override
   Widget build(BuildContext context) {
@@ -16484,7 +17984,7 @@ class _M3Badge extends StatelessWidget {
               child: ConstrainedBox(
                 constraints: const BoxConstraints(maxWidth: 150),
                 child: Transform.translate(
-                  offset: Offset(0, tightText ? 0 : -0.75),
+                  offset: Offset(0, labelYOffset ?? (tightText ? 0 : -0.75)),
                   child: Text(
                     label,
                     maxLines: 1,
@@ -16521,22 +18021,32 @@ class _M3Badge extends StatelessWidget {
 }
 
 class _MiniChip extends StatelessWidget {
-  const _MiniChip({required this.label, this.timeTone = false});
+  const _MiniChip({
+    required this.label,
+    this.timeTone = false,
+    this.labelYOffset,
+  });
 
   final String label;
   final bool timeTone;
+  final double? labelYOffset;
 
   @override
   Widget build(BuildContext context) {
     final colorScheme = Theme.of(context).colorScheme;
     if (!timeTone) {
-      return _M3Badge(label: label, tone: _M3BadgeTone.surface);
+      return _M3Badge(
+        label: label,
+        tone: _M3BadgeTone.surface,
+        labelYOffset: labelYOffset,
+      );
     }
     return _M3Badge(
       label: label,
       tone: _M3BadgeTone.primary,
       horizontalPadding: 8,
       tightText: true,
+      labelYOffset: labelYOffset,
       containerColorOverride: Color.alphaBlend(
         colorScheme.primary.withValues(alpha: 0.10),
         colorScheme.surfaceContainerHigh,
@@ -16756,6 +18266,36 @@ String _formatClipboardCount(int value) {
     }
   }
   return '$buffer mục';
+}
+
+bool _isRemoteVersionNewer(String remoteTag, String currentVersion) {
+  final remote = _versionParts(remoteTag);
+  final current = _versionParts(currentVersion);
+  for (
+    var index = 0;
+    index < math.max(remote.length, current.length);
+    index++
+  ) {
+    final remotePart = index < remote.length ? remote[index] : 0;
+    final currentPart = index < current.length ? current[index] : 0;
+    if (remotePart > currentPart) return true;
+    if (remotePart < currentPart) return false;
+  }
+  return false;
+}
+
+List<int> _versionParts(String value) {
+  final normalized = value
+      .trim()
+      .replaceFirst(RegExp(r'^[vV]'), '')
+      .split('+')
+      .first
+      .split('-')
+      .first;
+  return normalized
+      .split('.')
+      .map((part) => int.tryParse(part.replaceAll(RegExp(r'[^0-9]'), '')) ?? 0)
+      .toList(growable: false);
 }
 
 bool _isModifierLogicalKey(LogicalKeyboardKey key) {
@@ -17304,17 +18844,44 @@ String _stableTextHash(String value) {
 }
 
 String _friendlySyncError(Object error) {
-  final message = error.toString();
-  if (message.contains('No route to host') ||
-      message.contains('Network is unreachable')) {
+  final message = error.toString().trim();
+  final normalized = message.toLowerCase();
+  final cleaned = message
+      .replaceFirst(RegExp(r'^(SocketException|TimeoutException):\s*'), '')
+      .replaceFirst(RegExp(r',\s*address\s*=.*$', caseSensitive: false), '')
+      .replaceFirst(RegExp(r'\s*\(OS Error:.*$', caseSensitive: false), '')
+      .trim();
+  if (normalized.contains('no route to host') ||
+      normalized.contains('network is unreachable') ||
+      normalized.contains('host is unreachable')) {
     return 'Không có đường mạng tới host. Kiểm tra cùng Wi-Fi/VPN, IP trong payload và firewall Windows.';
   }
-  if (message.contains('Connection refused')) return 'Kết nối bị từ chối';
-  if (message.contains('timed out') || message.contains('TimeoutException')) {
+  if (normalized.contains('connection refused') ||
+      normalized.contains('actively refused') ||
+      normalized.contains('remote computer refused') ||
+      normalized.contains('connection attempt failed')) {
+    return 'Kết nối bị từ chối. Thiết bị kia có thể chưa mở OpenCB.';
+  }
+  if (normalized.contains('connection reset')) {
+    return 'Kết nối bị ngắt giữa chừng. Kiểm tra mạng LAN hoặc mở lại OpenCB trên thiết bị kia.';
+  }
+  if (normalized.contains('connection closed') ||
+      normalized.contains('kết nối đã đóng')) {
+    return 'Kết nối đã đóng trước khi sync xong.';
+  }
+  if (normalized.contains('timed out') ||
+      normalized.contains('time out') ||
+      normalized.contains('timeoutexception')) {
     return 'Sync quá thời gian chờ';
   }
-  if (message.contains('Failed host lookup')) return 'Không tìm thấy host';
-  return message.length > 80 ? '${message.substring(0, 80)}...' : message;
+  if (normalized.contains('failed host lookup') ||
+      normalized.contains('nodename nor servname provided')) {
+    return 'Không tìm thấy host';
+  }
+  if (normalized.contains('permission denied')) {
+    return 'Không có quyền mở kết nối mạng. Kiểm tra quyền mạng hoặc firewall.';
+  }
+  return cleaned.length > 80 ? '${cleaned.substring(0, 80)}...' : cleaned;
 }
 
 bool _isPlaceholderSyncDeviceName(String value) {
@@ -17398,7 +18965,11 @@ class LegacyJsonStorage implements OpenCbStorage {
     final kind = _classifyTextClipboard(text);
     late final ClipboardEntry stored;
     if (existing >= 0) {
-      stored = _entries[existing].copyWith(kind: kind, createdAt: now);
+      stored = _entries[existing].copyWith(
+        kind: kind,
+        source: source,
+        createdAt: now,
+      );
       _entries[existing] = stored;
     } else {
       stored = ClipboardEntry(
@@ -17430,7 +19001,10 @@ class LegacyJsonStorage implements OpenCbStorage {
           entry.kind == ClipboardKind.fileReference && entry.filePath == path,
     );
     if (existing >= 0) {
-      _entries[existing] = _entries[existing].copyWith(createdAt: now);
+      _entries[existing] = _entries[existing].copyWith(
+        source: source,
+        createdAt: now,
+      );
     } else {
       _entries.add(
         ClipboardEntry(

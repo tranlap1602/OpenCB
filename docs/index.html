@@ -1,0 +1,482 @@
+<!doctype html>
+<html lang="vi">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta
+      name="description"
+      content="OpenCB là ứng dụng quản lý clipboard, đồng bộ LAN và gửi file giữa Windows và Android."
+    />
+    <title>OpenCB - Clipboard & LAN Share</title>
+    <style>
+      :root {
+        color-scheme: light;
+        --primary: #0e7c7b;
+        --primary-strong: #0a5e5e;
+        --primary-soft: #dff4ef;
+        --accent: #7de2d1;
+        --ink: #10201f;
+        --muted: #5d6f6d;
+        --line: rgba(14, 124, 123, 0.18);
+        --surface: #fbfffd;
+        --surface-high: #eef8f5;
+        --shadow: 0 24px 70px rgba(14, 124, 123, 0.16);
+      }
+
+      * {
+        box-sizing: border-box;
+      }
+
+      body {
+        margin: 0;
+        min-height: 100vh;
+        background:
+          radial-gradient(circle at 15% 20%, rgba(125, 226, 209, 0.42), transparent 28rem),
+          radial-gradient(circle at 90% 10%, rgba(255, 215, 227, 0.35), transparent 26rem),
+          linear-gradient(180deg, #f7fffc 0%, #ffffff 56%, #edf7f4 100%);
+        color: var(--ink);
+        font-family:
+          Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont,
+          "Segoe UI", sans-serif;
+      }
+
+      a {
+        color: inherit;
+      }
+
+      .page {
+        width: min(1120px, calc(100% - 32px));
+        margin: 0 auto;
+      }
+
+      .nav {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 20px;
+        padding: 22px 0;
+      }
+
+      .brand {
+        display: inline-flex;
+        align-items: center;
+        gap: 12px;
+        text-decoration: none;
+        font-weight: 800;
+        letter-spacing: 0.01em;
+      }
+
+      .brand svg {
+        width: 38px;
+        height: 38px;
+        border-radius: 10px;
+        box-shadow: 0 10px 24px rgba(14, 124, 123, 0.2);
+      }
+
+      .nav-links {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+      }
+
+      .nav-links a {
+        border-radius: 999px;
+        padding: 10px 14px;
+        color: var(--muted);
+        font-size: 0.94rem;
+        font-weight: 700;
+        text-decoration: none;
+      }
+
+      .nav-links a:hover {
+        background: rgba(14, 124, 123, 0.08);
+        color: var(--primary-strong);
+      }
+
+      .hero {
+        display: grid;
+        grid-template-columns: minmax(0, 1.04fr) minmax(320px, 0.8fr);
+        align-items: center;
+        gap: 44px;
+        padding: 64px 0 44px;
+      }
+
+      .eyebrow {
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+        width: fit-content;
+        border: 1px solid var(--line);
+        border-radius: 999px;
+        background: rgba(255, 255, 255, 0.72);
+        padding: 8px 12px;
+        color: var(--primary-strong);
+        font-size: 0.88rem;
+        font-weight: 800;
+      }
+
+      .eyebrow::before {
+        content: "";
+        width: 8px;
+        height: 8px;
+        border-radius: 50%;
+        background: var(--primary);
+      }
+
+      h1 {
+        margin: 20px 0 16px;
+        max-width: 780px;
+        color: #0b1716;
+        font-size: clamp(2.65rem, 7vw, 5.35rem);
+        line-height: 1.04;
+        letter-spacing: -0.045em;
+      }
+
+      .lead {
+        max-width: 680px;
+        margin: 0;
+        color: var(--muted);
+        font-size: clamp(1.05rem, 2vw, 1.25rem);
+        line-height: 1.68;
+      }
+
+      .actions {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        gap: 12px;
+        margin-top: 30px;
+      }
+
+      .button {
+        display: inline-flex;
+        min-height: 48px;
+        align-items: center;
+        justify-content: center;
+        gap: 10px;
+        border: 1px solid transparent;
+        border-radius: 999px;
+        padding: 0 20px;
+        font-weight: 800;
+        text-decoration: none;
+        transition:
+          transform 180ms ease,
+          box-shadow 180ms ease,
+          background 180ms ease;
+      }
+
+      .button:hover {
+        transform: translateY(-1px);
+      }
+
+      .button.primary {
+        background: var(--primary);
+        color: white;
+        box-shadow: 0 14px 28px rgba(14, 124, 123, 0.28);
+      }
+
+      .button.secondary {
+        border-color: var(--line);
+        background: rgba(255, 255, 255, 0.76);
+        color: var(--primary-strong);
+      }
+
+      .mock {
+        border: 1px solid var(--line);
+        border-radius: 32px;
+        background: rgba(255, 255, 255, 0.78);
+        box-shadow: var(--shadow);
+        overflow: hidden;
+        backdrop-filter: blur(18px);
+      }
+
+      .mock-top {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        padding: 18px 18px 12px;
+      }
+
+      .mock-title {
+        display: flex;
+        align-items: center;
+        gap: 10px;
+        font-weight: 900;
+      }
+
+      .mock-title svg {
+        width: 32px;
+        height: 32px;
+      }
+
+      .pill {
+        border-radius: 999px;
+        background: var(--primary-soft);
+        color: var(--primary-strong);
+        padding: 7px 10px;
+        font-size: 0.8rem;
+        font-weight: 800;
+      }
+
+      .mock-list {
+        display: grid;
+        gap: 12px;
+        padding: 8px 18px 18px;
+      }
+
+      .item {
+        border: 1px solid rgba(14, 124, 123, 0.12);
+        border-radius: 20px;
+        background: var(--surface);
+        padding: 14px;
+      }
+
+      .item strong {
+        display: block;
+        margin-bottom: 6px;
+        font-size: 0.98rem;
+      }
+
+      .item span {
+        color: var(--muted);
+        font-size: 0.9rem;
+        line-height: 1.45;
+      }
+
+      .features {
+        display: grid;
+        grid-template-columns: repeat(3, 1fr);
+        gap: 14px;
+        padding: 22px 0 64px;
+      }
+
+      .feature {
+        border: 1px solid var(--line);
+        border-radius: 24px;
+        background: rgba(255, 255, 255, 0.72);
+        padding: 20px;
+      }
+
+      .feature-icon {
+        display: inline-flex;
+        width: 42px;
+        height: 42px;
+        align-items: center;
+        justify-content: center;
+        border-radius: 16px;
+        background: var(--primary-soft);
+        color: var(--primary-strong);
+        font-weight: 900;
+      }
+
+      .feature h2 {
+        margin: 16px 0 8px;
+        font-size: 1.1rem;
+      }
+
+      .feature p {
+        margin: 0;
+        color: var(--muted);
+        line-height: 1.6;
+      }
+
+      footer {
+        border-top: 1px solid var(--line);
+        padding: 24px 0 34px;
+        color: var(--muted);
+        font-size: 0.93rem;
+      }
+
+      footer .page {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: center;
+        justify-content: space-between;
+        gap: 12px;
+      }
+
+      footer a {
+        color: var(--primary-strong);
+        font-weight: 800;
+        text-decoration: none;
+      }
+
+      @media (max-width: 820px) {
+        .hero {
+          grid-template-columns: 1fr;
+          padding-top: 36px;
+        }
+
+        .features {
+          grid-template-columns: 1fr;
+        }
+
+        .nav {
+          align-items: flex-start;
+        }
+
+        .nav-links {
+          display: none;
+        }
+      }
+
+      @media (max-width: 520px) {
+        .page {
+          width: min(100% - 22px, 1120px);
+        }
+
+        .hero {
+          gap: 28px;
+        }
+
+        .actions {
+          align-items: stretch;
+          flex-direction: column;
+        }
+
+        .button {
+          width: 100%;
+        }
+
+        .mock {
+          border-radius: 24px;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <header class="page nav">
+      <a class="brand" href="#" aria-label="OpenCB">
+        <svg viewBox="0 0 512 512" fill="none" aria-hidden="true">
+          <rect width="512" height="512" rx="128" fill="#0E7C7B" />
+          <path
+            d="M166 132H346C368.091 132 386 149.909 386 172V356C386 378.091 368.091 396 346 396H166C143.909 396 126 378.091 126 356V172C126 149.909 143.909 132 166 132Z"
+            fill="#EAF7F4"
+          />
+          <path
+            d="M204 100H308C321.255 100 332 110.745 332 124V150C332 163.255 321.255 174 308 174H204C190.745 174 180 163.255 180 150V124C180 110.745 190.745 100 204 100Z"
+            fill="#7DE2D1"
+          />
+          <g transform="rotate(-45 256 260)">
+            <g transform="translate(152.6 375.6) scale(0.22)">
+              <path
+                d="M720-330q0 104-73 177T470-80q-104 0-177-73t-73-177v-370q0-75 52.5-127.5T400-880q75 0 127.5 52.5T580-700v350q0 46-32 78t-78 32q-46 0-78-32t-32-78v-370h80v370q0 13 8.5 21.5T470-320q13 0 21.5-8.5T500-350v-350q-1-42-29.5-71T400-800q-42 0-71 29t-29 71v370q-1 71 49 120.5T470-160q70 0 119-49.5T640-330v-390h80v390Z"
+                fill="#0A5E5E"
+              />
+            </g>
+          </g>
+        </svg>
+        <span>OpenCB</span>
+      </a>
+      <nav class="nav-links" aria-label="Liên kết nhanh">
+        <a href="#features">Tính năng</a>
+        <a href="#download">Tải xuống</a>
+        <a href="https://github.com/tranlap1602/OpenCB">GitHub</a>
+      </nav>
+    </header>
+
+    <main class="page">
+      <section class="hero">
+        <div>
+          <div class="eyebrow">Clipboard, sync LAN và gửi file</div>
+          <h1>OpenCB giúp clipboard đi cùng bạn.</h1>
+          <p class="lead">
+            Lưu lịch sử clipboard lớn, tìm lại nhanh, ghim và gắn thẻ nội dung,
+            đồng bộ giữa Windows và Android trong cùng mạng LAN, kèm gửi file
+            trực tiếp như một công cụ nội bộ gọn nhẹ.
+          </p>
+          <div class="actions" id="download">
+            <a
+              class="button primary"
+              href="https://github.com/tranlap1602/OpenCB/releases/latest/download/OpenCB-Setup-v1.1.0.exe"
+            >
+              Tải cho Windows
+            </a>
+            <a
+              class="button secondary"
+              href="https://github.com/tranlap1602/OpenCB/releases/latest/download/OpenCB-Android-release-v1.1.0.apk"
+            >
+              Tải APK Android
+            </a>
+            <a
+              class="button secondary"
+              href="https://github.com/tranlap1602/OpenCB/releases/latest"
+            >
+              Xem release mới nhất
+            </a>
+          </div>
+        </div>
+
+        <aside class="mock" aria-label="Minh họa OpenCB">
+          <div class="mock-top">
+            <div class="mock-title">
+              <svg viewBox="0 0 512 512" fill="none" aria-hidden="true">
+                <rect width="512" height="512" rx="128" fill="#0E7C7B" />
+                <path
+                  d="M166 132H346C368.091 132 386 149.909 386 172V356C386 378.091 368.091 396 346 396H166C143.909 396 126 378.091 126 356V172C126 149.909 143.909 132 166 132Z"
+                  fill="#EAF7F4"
+                />
+                <path
+                  d="M204 100H308C321.255 100 332 110.745 332 124V150C332 163.255 321.255 174 308 174H204C190.745 174 180 163.255 180 150V124C180 110.745 190.745 100 204 100Z"
+                  fill="#7DE2D1"
+                />
+              </svg>
+              <span>Lịch sử clipboard</span>
+            </div>
+            <span class="pill">LAN</span>
+          </div>
+          <div class="mock-list">
+            <div class="item">
+              <strong>Link tài liệu dự án</strong>
+              <span>URL được nhận diện riêng, mở lại nhanh khi cần.</span>
+            </div>
+            <div class="item">
+              <strong>Ảnh vừa copy từ trình duyệt</strong>
+              <span>Xem preview, ghim lại hoặc gửi sang thiết bị khác.</span>
+            </div>
+            <div class="item">
+              <strong>Gửi file tới điện thoại</strong>
+              <span>Chọn nhiều file/folder và gửi trong cùng mạng nội bộ.</span>
+            </div>
+          </div>
+        </aside>
+      </section>
+
+      <section class="features" id="features">
+        <article class="feature">
+          <span class="feature-icon">01</span>
+          <h2>Clipboard có tổ chức</h2>
+          <p>
+            Lưu văn bản, URL, ảnh, path file; tìm kiếm nhanh, ghim mục quan
+            trọng và gắn thẻ theo cách làm việc của bạn.
+          </p>
+        </article>
+        <article class="feature">
+          <span class="feature-icon">02</span>
+          <h2>Sync LAN riêng tư</h2>
+          <p>
+            Các thiết bị đã ghép nối tự thấy nhau trong cùng Wi-Fi/VPN, đồng bộ
+            clipboard mới mà không cần cloud.
+          </p>
+        </article>
+        <article class="feature">
+          <span class="feature-icon">03</span>
+          <h2>Gửi file nội bộ</h2>
+          <p>
+            Gửi file hoặc folder giữa Windows và Android, có xác nhận nhận file,
+            tiến trình truyền và lịch sử hoạt động.
+          </p>
+        </article>
+      </section>
+    </main>
+
+    <footer>
+      <div class="page">
+        <span>OpenCB đang trong giai đoạn phát triển nội bộ.</span>
+        <a href="https://github.com/tranlap1602/OpenCB/releases/latest">
+          Tải bản mới nhất
+        </a>
+      </div>
+    </footer>
+  </body>
+</html>

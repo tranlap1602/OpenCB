@@ -350,9 +350,12 @@ impl OpenCbCore {
         if let Some(existing_id) = self.find_by_hash(&hash)? {
             let now = now_rfc3339();
             self.conn.execute(
-                "UPDATE clipboard_items SET created_at = ?2, updated_at = ?2 WHERE id = ?1",
-                params![existing_id, now],
+                "UPDATE clipboard_items
+                 SET source_app = ?2, created_at = ?3, updated_at = ?3
+                 WHERE id = ?1",
+                params![existing_id, item.source_app, now],
             )?;
+            self.refresh_fts(&existing_id)?;
             return self.get_item(&existing_id);
         }
 

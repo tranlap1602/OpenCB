@@ -30,6 +30,7 @@ import android.os.PowerManager
 import android.provider.OpenableColumns
 import android.provider.MediaStore
 import android.provider.Settings
+import android.util.Log
 import android.view.View
 import android.widget.RemoteViews
 import android.widget.Toast
@@ -46,10 +47,13 @@ import java.io.InputStream
 import java.io.OutputStream
 import java.util.UUID
 
+private const val openCbLogTag = "OpenCB"
+
 object OpenCbNotificationBridge {
     var platformChannel: MethodChannel? = null
     var clipboardSendPromptEnabled = false
     private val mainHandler = Handler(Looper.getMainLooper())
+    private val pendingClipboardTexts = mutableListOf<String>()
 
     fun sendFileOfferAction(context: Context, intent: Intent?) {
         val action = intent?.getStringExtra("opencb_notification_action") ?: return
@@ -79,7 +83,8 @@ object OpenCbNotificationBridge {
                         payload["text"] = text
                     }
                 }
-            } catch (_: Exception) {
+            } catch (error: Exception) {
+                Log.w(openCbLogTag, "Unable to read clipboard for background action.", error)
             }
         }
         mainHandler.post {
@@ -100,7 +105,8 @@ object OpenCbNotificationBridge {
             } else {
                 null
             }
-        } catch (_: Exception) {
+        } catch (error: Exception) {
+            Log.w(openCbLogTag, "Unable to read clipboard from notification action.", error)
             null
         }
         if (text.isNullOrBlank()) return false
@@ -115,11 +121,53 @@ object OpenCbNotificationBridge {
 
     fun sendAndroidClipboardText(text: String) {
         if (text.isBlank()) return
+        synchronized(pendingClipboardTexts) {
+            if (pendingClipboardTexts.lastOrNull() != text) {
+                pendingClipboardTexts.add(text)
+            }
+        }
+        flushPendingClipboardTexts()
+    }
+
+    fun consumePendingClipboardTexts(): List<String> {
+        synchronized(pendingClipboardTexts) {
+            val texts = pendingClipboardTexts.toList()
+            pendingClipboardTexts.clear()
+            return texts
+        }
+    }
+
+    fun flushPendingClipboardTexts() {
         mainHandler.post {
-            platformChannel?.invokeMethod(
-                "androidClipboardText",
-                mapOf("text" to text, "source" to "Clipboard Android"),
-            )
+            val channel = platformChannel ?: return@post
+            val texts = synchronized(pendingClipboardTexts) {
+                pendingClipboardTexts.toList()
+            }
+            for (pendingText in texts) {
+                channel.invokeMethod(
+                    "androidClipboardText",
+                    mapOf("text" to pendingText, "source" to "Clipboard Android"),
+                    object : MethodChannel.Result {
+                        override fun success(result: Any?) {
+                            synchronized(pendingClipboardTexts) {
+                                pendingClipboardTexts.remove(pendingText)
+                            }
+                        }
+
+                        override fun error(
+                            errorCode: String,
+                            errorMessage: String?,
+                            errorDetails: Any?,
+                        ) {
+                            Log.w(openCbLogTag, "Flutter rejected pending clipboard text: $errorCode")
+                        }
+
+                        override fun notImplemented() {
+                            Log.w(openCbLogTag, "Flutter clipboard handler is not ready.")
+                        }
+                    },
+                )
+            }
         }
     }
 }
@@ -257,7 +305,8 @@ class OpenCbBackgroundService : Service() {
                     context.startService(intent)
                 }
                 true
-            } catch (_: Exception) {
+            } catch (error: Exception) {
+                Log.w(openCbLogTag, "Unable to start background service.", error)
                 false
             }
         }
@@ -266,7 +315,8 @@ class OpenCbBackgroundService : Service() {
             return try {
                 context.stopService(Intent(context, OpenCbBackgroundService::class.java))
                 true
-            } catch (_: Exception) {
+            } catch (error: Exception) {
+                Log.w(openCbLogTag, "Unable to stop background service.", error)
                 false
             }
         }
@@ -283,9 +333,9 @@ class OpenCbBackgroundService : Service() {
         super.onCreate()
         isRunning = true
         ensureChannel()
+        startForeground(notificationId, buildNotification())
         acquireMulticastLock()
         startClipboardListener()
-        startForeground(notificationId, buildNotification())
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -317,7 +367,8 @@ class OpenCbBackgroundService : Service() {
                 setReferenceCounted(false)
                 acquire()
             }
-        } catch (_: Exception) {
+        } catch (error: Exception) {
+            Log.w(openCbLogTag, "Unable to acquire multicast lock.", error)
             multicastLock = null
         }
     }
@@ -325,7 +376,8 @@ class OpenCbBackgroundService : Service() {
     private fun releaseMulticastLock() {
         try {
             multicastLock?.takeIf { it.isHeld }?.release()
-        } catch (_: Exception) {
+        } catch (error: Exception) {
+            Log.w(openCbLogTag, "Unable to release multicast lock.", error)
         } finally {
             multicastLock = null
         }
@@ -337,7 +389,8 @@ class OpenCbBackgroundService : Service() {
                 applicationContext.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
             clipboardManager?.addPrimaryClipChangedListener(clipboardListener)
             emitPrimaryClipboardText()
-        } catch (_: Exception) {
+        } catch (error: Exception) {
+            Log.w(openCbLogTag, "Unable to start clipboard listener.", error)
             clipboardManager = null
         }
     }
@@ -345,7 +398,8 @@ class OpenCbBackgroundService : Service() {
     private fun stopClipboardListener() {
         try {
             clipboardManager?.removePrimaryClipChangedListener(clipboardListener)
-        } catch (_: Exception) {
+        } catch (error: Exception) {
+            Log.w(openCbLogTag, "Unable to stop clipboard listener.", error)
         } finally {
             clipboardManager = null
         }
@@ -362,7 +416,8 @@ class OpenCbBackgroundService : Service() {
                 showClipboardSendPrompt(text)
             }
             OpenCbNotificationBridge.sendAndroidClipboardText(text)
-        } catch (_: Exception) {
+        } catch (error: Exception) {
+            Log.w(openCbLogTag, "Unable to emit clipboard text from background service.", error)
         }
     }
 
@@ -474,10 +529,13 @@ class OpenCbBackgroundService : Service() {
             )
         }
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
-            builder.setCustomContentView(compactView)
-            builder.setStyle(android.app.Notification.DecoratedCustomViewStyle())
+            builder
+                .setCustomContentView(compactView)
+                .setCustomBigContentView(compactView)
+                .setCustomHeadsUpContentView(compactView)
+                .setStyle(android.app.Notification.DecoratedCustomViewStyle())
         }
-        return builder
+        val notification = builder
             .setSmallIcon(R.drawable.ic_stat_opencb)
             .setContentTitle("OpenCB đang chạy nền")
             .setContentText("Sync LAN sẵn sàng")
@@ -493,6 +551,11 @@ class OpenCbBackgroundService : Service() {
             .setPriority(android.app.Notification.PRIORITY_MIN)
             .setVisibility(android.app.Notification.VISIBILITY_SECRET)
             .build()
+        notification.flags =
+            notification.flags or
+                android.app.Notification.FLAG_ONGOING_EVENT or
+                android.app.Notification.FLAG_NO_CLEAR
+        return notification
     }
 
     private fun backgroundActionIntent(action: String): PendingIntent {
@@ -573,6 +636,7 @@ class MainActivity : FlutterActivity() {
         val channel = MethodChannel(flutterEngine.dartExecutor.binaryMessenger, "opencb/platform")
         platformChannel = channel
         OpenCbNotificationBridge.platformChannel = channel
+        OpenCbNotificationBridge.flushPendingClipboardTexts()
         OpenCbSharedFileBridge.platformChannel = channel
         channel.setMethodCallHandler { call, result ->
                 when (call.method) {
@@ -650,8 +714,20 @@ class MainActivity : FlutterActivity() {
                             )
                         )
                     }
+                    "showToast" -> {
+                        val message = call.argument<String>("message") ?: ""
+                        if (message.isNotBlank()) {
+                            runOnUiThread {
+                                Toast.makeText(this, message, Toast.LENGTH_SHORT).show()
+                            }
+                        }
+                        result.success(true)
+                    }
                     "consumeSharedFiles" -> {
                         result.success(OpenCbSharedFileBridge.consume())
+                    }
+                    "consumeAndroidClipboardTexts" -> {
+                        result.success(OpenCbNotificationBridge.consumePendingClipboardTexts())
                     }
                     "pickAndroidFiles" -> {
                         pickAndroidFiles(result)
@@ -915,9 +991,8 @@ class MainActivity : FlutterActivity() {
     private fun openNotificationSettings(): Boolean {
         return try {
             val intent = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                Intent(Settings.ACTION_CHANNEL_NOTIFICATION_SETTINGS).apply {
+                Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS).apply {
                     putExtra(Settings.EXTRA_APP_PACKAGE, packageName)
-                    putExtra(Settings.EXTRA_CHANNEL_ID, "opencb_background_v5")
                 }
             } else {
                 Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
@@ -994,7 +1069,6 @@ class MainActivity : FlutterActivity() {
         }
         builder
             .setSmallIcon(R.drawable.ic_stat_opencb)
-            .setLargeIcon(appIconBitmap(40))
             .setContentTitle(title)
             .setContentIntent(pendingIntent)
             .setAutoCancel(true)
@@ -1004,6 +1078,9 @@ class MainActivity : FlutterActivity() {
             .setOnlyAlertOnce(true)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             builder.setBadgeIconType(android.app.Notification.BADGE_ICON_NONE)
+        }
+        if (!showFileOfferActions) {
+            builder.setLargeIcon(appIconBitmap(40))
         }
         if (silent) {
             builder
