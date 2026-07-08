@@ -17,7 +17,7 @@ import 'package:path_provider/path_provider.dart';
 import 'package:qr_flutter/qr_flutter.dart';
 
 const MethodChannel _rootPlatformChannel = MethodChannel('opencb/platform');
-const String _appVersion = '1.1.0';
+const String _appVersion = '1.5.0';
 const String _appVersionLabel = 'v$_appVersion';
 const String _landingPageUrl = 'https://tranlap1602.github.io/OpenCB/';
 const String _githubRepoUrl = 'https://github.com/tranlap1602/OpenCB';
