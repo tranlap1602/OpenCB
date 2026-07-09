@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">OpenCB</string>
+    <string name="notification_clipboard_new">New clipboard</string>
+    <string name="notification_action_send_clipboard">Send clipboard</string>
+    <string name="notification_action_send_file">Send file</string>
+    <string name="notification_background_title">OpenCB is running in background</string>
+    <string name="notification_background_channel_name">OpenCB background</string>
+    <string name="notification_background_channel_description">Keep OpenCB online and provide clipboard/file actions</string>
+    <string name="notification_background_no_devices">Not connected to any devices</string>
+    <string name="notification_background_connected">Connected: %1$s</string>
+</resources>

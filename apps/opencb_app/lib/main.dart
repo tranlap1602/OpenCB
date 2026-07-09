@@ -13,11 +13,12 @@ import 'package:flutter/services.dart';
 import 'package:ffi/ffi.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:mobile_scanner/mobile_scanner.dart';
+import 'package:opencb_app/l10n/generated/app_localizations.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:qr_flutter/qr_flutter.dart';
 
 const MethodChannel _rootPlatformChannel = MethodChannel('opencb/platform');
-const String _appVersion = '1.5.0';
+const String _appVersion = '1.6.0';
 const String _appVersionLabel = 'v$_appVersion';
 const String _landingPageUrl = 'https://tranlap1602.github.io/OpenCB/';
 const String _githubRepoUrl = 'https://github.com/tranlap1602/OpenCB';
@@ -80,6 +81,29 @@ void _applyAndroidSystemUiStyle(
 enum ClipboardKind { text, code, url, image, fileReference }
 
 enum _HistoryScopeFilter { all, pinned, tagged }
+
+enum AppLanguage {
+  system(null),
+  vi(Locale('vi')),
+  en(Locale('en'));
+
+  const AppLanguage(this.locale);
+
+  final Locale? locale;
+
+  String get storageValue => name;
+
+  static AppLanguage fromStorageValue(String? value) {
+    return AppLanguage.values.firstWhere(
+      (language) => language.storageValue == value,
+      orElse: () => AppLanguage.system,
+    );
+  }
+}
+
+extension AppLocalizationsX on BuildContext {
+  AppLocalizations get l10n => AppLocalizations.of(this);
+}
 
 const double _compactDesktopLayoutBreakpoint = 1020;
 const double _mobileLayoutBreakpoint = 840;
@@ -695,7 +719,7 @@ const List<M3ThemePreset> _m3ThemePresets = [
   ),
   M3ThemePreset(
     id: 'baseline_purple',
-    name: 'Tôm Càng Tím',
+    name: 'Tím',
     seedColor: Color(0xFF7B4DFF),
   ),
   M3ThemePreset(id: 'ink_blue', name: 'Serenity', seedColor: Color(0xFF285EA8)),
@@ -1022,6 +1046,7 @@ class OpenCbApp extends StatefulWidget {
 class _OpenCbAppState extends State<OpenCbApp> with WidgetsBindingObserver {
   ThemeMode _themeMode = ThemeMode.light;
   M3ThemePreset _themePreset = _m3ThemePresets.first;
+  AppLanguage _language = AppLanguage.vi;
 
   Brightness get _effectiveSystemUiBrightness {
     return switch (_themeMode) {
@@ -1072,10 +1097,14 @@ class _OpenCbAppState extends State<OpenCbApp> with WidgetsBindingObserver {
           jsonDecode(await file.readAsString()) as Map<String, dynamic>;
       final preset = _presetById(decoded['presetId'] as String?);
       final mode = _themeModeFromName(decoded['themeMode'] as String?);
+      final language = AppLanguage.fromStorageValue(
+        decoded['language'] as String?,
+      );
       if (!mounted) return;
       setState(() {
         _themePreset = preset;
         _themeMode = mode;
+        _language = language;
       });
       _applyCurrentAndroidSystemUiStyle();
     } catch (_) {
@@ -1091,6 +1120,7 @@ class _OpenCbAppState extends State<OpenCbApp> with WidgetsBindingObserver {
       encoder.convert({
         'themeMode': _themeMode.name,
         'presetId': _themePreset.id,
+        'language': _language.storageValue,
       }),
     );
   }
@@ -1107,19 +1137,29 @@ class _OpenCbAppState extends State<OpenCbApp> with WidgetsBindingObserver {
     _saveThemeSettings();
   }
 
+  void _setLanguage(AppLanguage language) {
+    setState(() => _language = language);
+    _saveThemeSettings();
+  }
+
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
       debugShowCheckedModeBanner: false,
       title: 'OpenCB',
+      locale: _language.locale,
+      localizationsDelegates: AppLocalizations.localizationsDelegates,
+      supportedLocales: AppLocalizations.supportedLocales,
       theme: _buildTheme(Brightness.light, _themePreset),
       darkTheme: _buildTheme(Brightness.dark, _themePreset),
       themeMode: _themeMode,
       home: ClipboardHomePage(
         themeMode: _themeMode,
         themePreset: _themePreset,
+        language: _language,
         onThemeModeChanged: _setThemeMode,
         onThemePresetChanged: _setThemePreset,
+        onLanguageChanged: _setLanguage,
       ),
     );
   }
@@ -1276,14 +1316,18 @@ class ClipboardHomePage extends StatefulWidget {
     super.key,
     required this.themeMode,
     required this.themePreset,
+    required this.language,
     required this.onThemeModeChanged,
     required this.onThemePresetChanged,
+    required this.onLanguageChanged,
   });
 
   final ThemeMode themeMode;
   final M3ThemePreset themePreset;
+  final AppLanguage language;
   final ValueChanged<ThemeMode> onThemeModeChanged;
   final ValueChanged<M3ThemePreset> onThemePresetChanged;
+  final ValueChanged<AppLanguage> onLanguageChanged;
 
   @override
   State<ClipboardHomePage> createState() => _ClipboardHomePageState();
@@ -1345,6 +1389,7 @@ class _ClipboardHomePageState extends State<ClipboardHomePage>
   String? _syncError;
   String? _latestUpdateMessage;
   String? _lastClipboardText;
+  String _lastAndroidBackgroundNotificationDevicesKey = '';
   OpenCbStorage? _storage;
   LocalSyncIdentity _syncIdentity = LocalSyncIdentity.create();
   ClipboardSettings _clipboardSettings = ClipboardSettings.defaults();
@@ -1470,6 +1515,8 @@ class _ClipboardHomePageState extends State<ClipboardHomePage>
       final action = args['action']?.toString();
       if (action == 'sendClipboard') {
         await _sendClipboardFromNotification(args['text']?.toString());
+      } else if (action == 'pickFiles') {
+        await _pickTransferFilesFromNotification();
       }
       return null;
     }
@@ -1877,6 +1924,34 @@ class _ClipboardHomePageState extends State<ClipboardHomePage>
     } catch (_) {}
   }
 
+  List<String> get _androidBackgroundNotificationDeviceNames {
+    if (!_lanSyncEnabled) return const [];
+    final seen = <String>{};
+    final names = <String>[];
+    for (final peer in _onlineFileTransferPeers) {
+      final name = peer.name.trim();
+      if (name.isEmpty || !seen.add(name.toLowerCase())) continue;
+      names.add(name);
+    }
+    return names;
+  }
+
+  Future<void> _syncAndroidBackgroundNotificationDevices({
+    bool force = false,
+  }) async {
+    if (!Platform.isAndroid) return;
+    final names = _androidBackgroundNotificationDeviceNames;
+    final key = names.join('\u0001');
+    if (!force && key == _lastAndroidBackgroundNotificationDevicesKey) return;
+    try {
+      await _platformChannel.invokeMethod<bool>(
+        'setBackgroundNotificationDevices',
+        {'names': names},
+      );
+      _lastAndroidBackgroundNotificationDevicesKey = key;
+    } catch (_) {}
+  }
+
   Future<bool> _syncAndroidBackgroundService(
     bool enabled, {
     required bool openBatterySettings,
@@ -1899,6 +1974,7 @@ class _ClipboardHomePageState extends State<ClipboardHomePage>
         );
         return false;
       }
+      unawaited(_syncAndroidBackgroundNotificationDevices(force: true));
       if (!enabled || !openBatterySettings) return true;
       final opened = await _platformChannel.invokeMethod<bool>(
         'requestIgnoreBatteryOptimizations',
@@ -2224,6 +2300,7 @@ class _ClipboardHomePageState extends State<ClipboardHomePage>
     await _startFileTransferServer();
     await _startLanDiscovery();
     _startAutoSync();
+    unawaited(_syncAndroidBackgroundNotificationDevices(force: true));
   }
 
   Future<void> _refreshSyncHost() async {
@@ -2307,6 +2384,7 @@ class _ClipboardHomePageState extends State<ClipboardHomePage>
       _peers = [];
     }
     if (mounted) setState(() {});
+    unawaited(_syncAndroidBackgroundNotificationDevices(force: true));
   }
 
   Future<void> _savePeers() async {
@@ -2316,6 +2394,7 @@ class _ClipboardHomePageState extends State<ClipboardHomePage>
     await file.writeAsString(
       encoder.convert(_peers.map((peer) => peer.toJson()).toList()),
     );
+    unawaited(_syncAndroidBackgroundNotificationDevices(force: true));
   }
 
   Future<void> _startSyncServer() async {
@@ -2383,11 +2462,12 @@ class _ClipboardHomePageState extends State<ClipboardHomePage>
       socket.listen(_handleDiscoveryEvent, onError: (_) {});
       _discoverySocket = socket;
       unawaited(_sendDiscoveryBeacon());
+      unawaited(_syncAndroidBackgroundNotificationDevices(force: true));
       _discoveryTimer?.cancel();
-      _discoveryTimer = Timer.periodic(
-        const Duration(seconds: 4),
-        (_) => unawaited(_sendDiscoveryBeacon()),
-      );
+      _discoveryTimer = Timer.periodic(const Duration(seconds: 4), (_) {
+        unawaited(_sendDiscoveryBeacon());
+        unawaited(_syncAndroidBackgroundNotificationDevices());
+      });
     } catch (_) {}
   }
 
@@ -2397,6 +2477,7 @@ class _ClipboardHomePageState extends State<ClipboardHomePage>
     _discoverySocket?.close();
     _discoverySocket = null;
     if (mounted) setState(() => _discoveredDevices = {});
+    unawaited(_syncAndroidBackgroundNotificationDevices(force: true));
   }
 
   void _handleDiscoveryEvent(RawSocketEvent event) {
@@ -2535,6 +2616,7 @@ class _ClipboardHomePageState extends State<ClipboardHomePage>
       }
     });
     if (shouldSavePeers) unawaited(_savePeers());
+    unawaited(_syncAndroidBackgroundNotificationDevices());
     if (peerIndex >= 0) _maybeRetryDiscoveredPeer(device.id);
   }
 
@@ -2557,6 +2639,7 @@ class _ClipboardHomePageState extends State<ClipboardHomePage>
     } else {
       _discoveredDevices = freshDevices;
     }
+    unawaited(_syncAndroidBackgroundNotificationDevices());
   }
 
   void _maybeRetryDiscoveredPeer(String peerId) {
@@ -3548,18 +3631,18 @@ class _ClipboardHomePageState extends State<ClipboardHomePage>
     final accepted = await showDialog<bool>(
       context: context,
       builder: (context) => AlertDialog(
-        title: const Text('Dọn lịch sử gửi nhận'),
+        title: Text(context.l10n.clearTransferHistoryTitle),
         content: Text(
-          'Xóa $removableCount hoạt động gửi nhận đã kết thúc khỏi lịch sử.',
+          '${context.l10n.clearTransferHistoryBodyPrefix} ${_localizedItemCount(context.l10n, removableCount)} ${context.l10n.clearTransferHistoryBodySuffix}',
         ),
         actions: [
           TextButton(
             onPressed: () => Navigator.of(context).pop(false),
-            child: const Text('Hủy'),
+            child: Text(context.l10n.cancel),
           ),
           FilledButton(
             onPressed: () => Navigator.of(context).pop(true),
-            child: const Text('Dọn'),
+            child: Text(context.l10n.clear),
           ),
         ],
       ),
@@ -3698,10 +3781,11 @@ class _ClipboardHomePageState extends State<ClipboardHomePage>
       final decision = Completer<bool>();
       _pendingFileOfferDecisions[record.id] = decision;
       _pendingFileOfferRecords[record.id] = record;
+      final l10n = context.l10n;
       final shown = await _showAndroidBackgroundNotification(
-        title: 'Có file gửi tới OpenCB',
+        title: l10n.incomingFileNotificationTitle,
         body:
-            '${record.peerName} muốn gửi ${record.files.length} file (${_formatBytes(record.totalBytes)}).',
+            '${record.peerName} ${l10n.wantsToSend} ${_localizedFileCount(l10n, record.files.length)} (${_formatBytes(record.totalBytes)}).',
         transferId: record.id,
         showFileOfferActions: true,
       );
@@ -3729,8 +3813,9 @@ class _ClipboardHomePageState extends State<ClipboardHomePage>
       context: context,
       builder: (context) {
         final colorScheme = Theme.of(context).colorScheme;
+        final l10n = context.l10n;
         return AlertDialog(
-          title: const Text('Nhận file?'),
+          title: Text(l10n.incomingFileTitle),
           content: ConstrainedBox(
             constraints: const BoxConstraints(maxWidth: 420),
             child: Column(
@@ -3738,7 +3823,7 @@ class _ClipboardHomePageState extends State<ClipboardHomePage>
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 Text(
-                  '${record.peerName} muốn gửi ${record.files.length} file (${_formatBytes(record.totalBytes)}).',
+                  '${record.peerName} ${l10n.wantsToSend} ${_localizedFileCount(l10n, record.files.length)} (${_formatBytes(record.totalBytes)}).',
                 ),
                 const SizedBox(height: 14),
                 DecoratedBox(
@@ -3769,7 +3854,10 @@ class _ClipboardHomePageState extends State<ClipboardHomePage>
                           Align(
                             alignment: Alignment.centerLeft,
                             child: Text(
-                              '+${record.files.length - 4} file khác',
+                              _localizedMoreFileCount(
+                                l10n,
+                                record.files.length - 4,
+                              ),
                               style: Theme.of(context).textTheme.bodySmall,
                             ),
                           ),
@@ -3783,12 +3871,12 @@ class _ClipboardHomePageState extends State<ClipboardHomePage>
           actions: [
             TextButton(
               onPressed: () => Navigator.of(context).pop(false),
-              child: const Text('Từ chối'),
+              child: Text(l10n.rejected),
             ),
             FilledButton.icon(
               onPressed: () => Navigator.of(context).pop(true),
               icon: const Icon(Icons.file_download_outlined),
-              label: const Text('Nhận'),
+              label: Text(l10n.accept),
             ),
           ],
         );
@@ -3895,16 +3983,25 @@ class _ClipboardHomePageState extends State<ClipboardHomePage>
     await _addTransferPaths(paths);
   }
 
+  Future<void> _pickTransferFilesFromNotification() async {
+    if (!mounted) return;
+    _selectSection('Gửi file');
+    await Future<void>.delayed(const Duration(milliseconds: 180));
+    if (!mounted) return;
+    await _pickTransferFiles();
+  }
+
   Future<void> _pickTransferFolder() async {
     final path = await FilePicker.platform.getDirectoryPath(
       lockParentWindow: true,
-      dialogTitle: 'Chọn folder để gửi',
+      dialogTitle: context.l10n.chooseFolder,
     );
     if (path == null || path.trim().isEmpty) return;
     await _addTransferPaths([path]);
   }
 
   Future<void> _addTransferPaths(List<String> paths) async {
+    final l10n = context.l10n;
     final files = <FileTransferFile>[];
     for (final path in paths) {
       final file = File(path);
@@ -3924,7 +4021,7 @@ class _ClipboardHomePageState extends State<ClipboardHomePage>
       }
     }
     if (files.isEmpty) {
-      _showCenterSnackBar('Không đọc được file hoặc folder đã chọn.');
+      _showCenterSnackBar(l10n.cannotReadSelectedFileOrFolder);
       return;
     }
     setState(() {
@@ -4024,16 +4121,17 @@ class _ClipboardHomePageState extends State<ClipboardHomePage>
   }
 
   Future<void> _sendSelectedFilesToTargets() async {
+    final l10n = context.l10n;
     final files = List<FileTransferFile>.from(_selectedTransferFiles);
     final peers = _onlineFileTransferPeers
         .where((peer) => _fileTransferTargetIds.contains(peer.id))
         .toList();
     if (files.isEmpty) {
-      _showCenterSnackBar('Chọn file hoặc folder trước.');
+      _showCenterSnackBar(context.l10n.chooseFileOrFolderFirst);
       return;
     }
     if (peers.isEmpty) {
-      _showCenterSnackBar('Chọn ít nhất một thiết bị online.');
+      _showCenterSnackBar(context.l10n.chooseOnlineDeviceFirst);
       return;
     }
     final results = await Future.wait([
@@ -4050,15 +4148,15 @@ class _ClipboardHomePageState extends State<ClipboardHomePage>
       });
       _showCenterSnackBar(
         peers.length == 1
-            ? 'Đã gửi file thành công.'
-            : 'Đã gửi file tới ${peers.length} thiết bị.',
+            ? l10n.fileSentSuccess
+            : '${l10n.fileSentTo} ${_localizedDeviceCount(l10n, peers.length)}.',
         success: true,
         maxWidth: 360,
         duration: const Duration(seconds: 2),
       );
     } else if (completedCount > 0) {
       _showCenterSnackBar(
-        'Đã gửi xong $completedCount/${peers.length} thiết bị.',
+        '${l10n.fileSendPartialDone} $completedCount/${peers.length} ${l10n.deviceUnit}.',
         maxWidth: 360,
       );
     }
@@ -4076,7 +4174,7 @@ class _ClipboardHomePageState extends State<ClipboardHomePage>
         )
         .toList();
     if (files.isEmpty) {
-      _showCenterSnackBar('Không đọc được file đã chọn.');
+      _showCenterSnackBar(context.l10n.cannotReadSelectedFile);
       return FileTransferStatus.failed;
     }
 
@@ -5036,10 +5134,11 @@ class _ClipboardHomePageState extends State<ClipboardHomePage>
 
   Future<void> _checkForUpdates({bool userInitiated = true}) async {
     if (_checkingForUpdates) return;
+    final l10n = context.l10n;
     if (mounted) {
       setState(() {
         _checkingForUpdates = true;
-        if (userInitiated) _latestUpdateMessage = 'Đang kiểm tra...';
+        if (userInitiated) _latestUpdateMessage = l10n.checkingUpdatesMessage;
       });
     }
 
@@ -5070,13 +5169,13 @@ class _ClipboardHomePageState extends State<ClipboardHomePage>
         if (!mounted) return;
         setState(() {
           _latestUpdateMessage = hasUpdate
-              ? 'Có bản mới $tag.'
-              : 'Bạn đang dùng bản mới nhất.';
+              ? '${l10n.newVersionAvailable} $tag.'
+              : l10n.latestVersionMessage;
         });
         if (hasUpdate) {
           await _showUpdateAvailableDialog(tag, releaseUrl);
         } else if (userInitiated) {
-          _showCenterSnackBar('Bạn đang dùng bản mới nhất.', success: true);
+          _showCenterSnackBar(l10n.latestVersionMessage, success: true);
         }
       } finally {
         client.close(force: true);
@@ -5085,12 +5184,11 @@ class _ClipboardHomePageState extends State<ClipboardHomePage>
       if (!mounted) return;
       setState(() {
         if (userInitiated) {
-          _latestUpdateMessage =
-              'Không kiểm tra được. Kiểm tra mạng hoặc quyền truy cập release.';
+          _latestUpdateMessage = l10n.cannotCheckUpdatesMessage;
         }
       });
       if (userInitiated) {
-        _showCenterSnackBar('Không kiểm tra được cập nhật.');
+        _showCenterSnackBar(l10n.cannotCheckUpdates);
       }
     } finally {
       if (mounted) setState(() => _checkingForUpdates = false);
@@ -5352,9 +5450,10 @@ class _ClipboardHomePageState extends State<ClipboardHomePage>
 
   void _showDeleteUndoNotice(List<ClipboardEntry> entries) {
     if (!mounted || entries.isEmpty) return;
+    final l10n = context.l10n;
     final message = entries.length == 1
-        ? 'Đã xóa clipboard.'
-        : 'Đã xóa ${entries.length} clipboard.';
+        ? l10n.deletedClipboard
+        : '${l10n.deletedClipboardPrefix} ${entries.length} ${l10n.deletedClipboardSuffix}';
     final margin = _deleteUndoNoticeMargin();
     final actionBarRect = _desktopDetailActionBarRect();
     final overlay = Overlay.of(context, rootOverlay: true);
@@ -5583,7 +5682,7 @@ class _ClipboardHomePageState extends State<ClipboardHomePage>
     final unpinnedCount = _entries.where((entry) => !entry.pinned).length;
     if (unpinnedCount == 0) {
       if (!mounted) return;
-      _showCenterSnackBar('Không có clipboard chưa ghim để dọn.');
+      _showCenterSnackBar(context.l10n.noUnpinnedClipboardToClean);
       return;
     }
 
@@ -5591,14 +5690,17 @@ class _ClipboardHomePageState extends State<ClipboardHomePage>
       context: context,
       builder: (context) {
         final colorScheme = Theme.of(context).colorScheme;
+        final l10n = context.l10n;
         return AlertDialog(
           icon: const Icon(Icons.clear_all),
-          title: const Text('Dọn clipboard'),
-          content: Text('Xóa $unpinnedCount mục chưa ghim khỏi lịch sử.'),
+          title: Text(l10n.cleanClipboardTitle),
+          content: Text(
+            '${l10n.cleanClipboardBodyPrefix} ${_localizedItemCount(l10n, unpinnedCount)} ${l10n.cleanClipboardBodySuffix}',
+          ),
           actions: [
             TextButton(
               onPressed: () => Navigator.of(context).pop(false),
-              child: const _ButtonLabel('Hủy'),
+              child: _ButtonLabel(l10n.cancel),
             ),
             FilledButton(
               style: FilledButton.styleFrom(
@@ -5606,7 +5708,7 @@ class _ClipboardHomePageState extends State<ClipboardHomePage>
                 foregroundColor: colorScheme.onError,
               ),
               onPressed: () => Navigator.of(context).pop(true),
-              child: const _ButtonLabel('Dọn'),
+              child: _ButtonLabel(l10n.clear),
             ),
           ],
         );
@@ -5697,30 +5799,35 @@ class _ClipboardHomePageState extends State<ClipboardHomePage>
       if (!mounted) return;
       final confirmed = await showDialog<bool>(
         context: context,
-        builder: (context) => AlertDialog(
-          icon: const Icon(Icons.restore_outlined),
-          title: const Text('Khôi phục dữ liệu?'),
-          content: Text(
-            'Nhập $itemCount mục clipboard từ backup. '
-            'Dữ liệu hiện có sẽ được giữ lại và gộp thêm dữ liệu trong file.',
-          ),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.of(context).pop(false),
-              child: const _ButtonLabel('Hủy'),
+        builder: (context) {
+          final l10n = context.l10n;
+          return AlertDialog(
+            icon: const Icon(Icons.restore_outlined),
+            title: Text(l10n.restoreDataTitle),
+            content: Text(
+              '${l10n.restoreDataBodyPrefix} ${_localizedItemCount(l10n, itemCount)} ${l10n.restoreDataBodySuffix}',
             ),
-            FilledButton(
-              onPressed: () => Navigator.of(context).pop(true),
-              child: const _ButtonLabel('Khôi phục'),
-            ),
-          ],
-        ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.of(context).pop(false),
+                child: _ButtonLabel(l10n.cancel),
+              ),
+              FilledButton(
+                onPressed: () => Navigator.of(context).pop(true),
+                child: _ButtonLabel(l10n.restoreAction),
+              ),
+            ],
+          );
+        },
       );
       if (confirmed != true) return;
 
       final imported = await _restoreBackupPayload(decoded);
       if (!mounted) return;
-      _showCenterSnackBar('Đã khôi phục $imported mục clipboard.');
+      final l10n = context.l10n;
+      _showCenterSnackBar(
+        '${l10n.restoredClipboardPrefix} ${_localizedItemCount(l10n, imported)} ${l10n.restoredClipboardSuffix}',
+      );
     } catch (_) {
       if (!mounted) return;
       _showCenterSnackBar('Không khôi phục được backup.');
@@ -5809,29 +5916,31 @@ class _ClipboardHomePageState extends State<ClipboardHomePage>
 
   Future<void> _confirmResetClipboardHistory() async {
     if (_entries.isEmpty) {
-      _showCenterSnackBar('Lịch sử clipboard đang trống.');
+      _showCenterSnackBar(context.l10n.historyAlreadyEmpty);
       return;
     }
     final confirmed = await showDialog<bool>(
       context: context,
-      builder: (context) => AlertDialog(
-        icon: const Icon(Icons.delete_sweep_outlined),
-        title: const Text('Xóa toàn bộ lịch sử?'),
-        content: Text(
-          'Thao tác này sẽ xóa ${_entries.length} mục clipboard đang lưu. '
-          'Cài đặt, thẻ và thiết bị sync vẫn được giữ lại.',
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.of(context).pop(false),
-            child: const _ButtonLabel('Hủy'),
+      builder: (context) {
+        final l10n = context.l10n;
+        return AlertDialog(
+          icon: const Icon(Icons.delete_sweep_outlined),
+          title: Text(l10n.clearAllHistoryTitle),
+          content: Text(
+            '${l10n.clearAllHistoryBodyPrefix} ${_localizedItemCount(l10n, _entries.length)} ${l10n.clearAllHistoryBodySuffix}',
           ),
-          FilledButton(
-            onPressed: () => Navigator.of(context).pop(true),
-            child: const _ButtonLabel('Xóa lịch sử'),
-          ),
-        ],
-      ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(context).pop(false),
+              child: _ButtonLabel(l10n.cancel),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.of(context).pop(true),
+              child: _ButtonLabel(l10n.deleteHistory),
+            ),
+          ],
+        );
+      },
     );
     if (confirmed != true) return;
     final storage = _storage;
@@ -5872,6 +5981,7 @@ class _ClipboardHomePageState extends State<ClipboardHomePage>
       await _stopFileTransferServer();
       _stopLanDiscovery();
     }
+    unawaited(_syncAndroidBackgroundNotificationDevices(force: true));
   }
 
   Future<void> _addPeer() async {
@@ -5883,7 +5993,9 @@ class _ClipboardHomePageState extends State<ClipboardHomePage>
     final accepted = await _sendPairRequest(peer);
     if (!mounted) return;
     _showCenterSnackBar(
-      accepted ? 'Đã kết nối ${peer.name}.' : 'Chưa ghép nối thiết bị.',
+      accepted
+          ? '${context.l10n.paired} ${peer.name}.'
+          : context.l10n.notPaired,
     );
   }
 
@@ -5892,13 +6004,15 @@ class _ClipboardHomePageState extends State<ClipboardHomePage>
     if (payload == null || !mounted) return;
     final peer = _parsePairPayload(payload);
     if (peer == null) {
-      _showCenterSnackBar('QR pairing không hợp lệ.');
+      _showCenterSnackBar(context.l10n.invalidQrPairing);
       return;
     }
     final accepted = await _sendPairRequest(peer);
     if (!mounted) return;
     _showCenterSnackBar(
-      accepted ? 'Đã kết nối ${peer.name}.' : 'Chưa ghép nối thiết bị.',
+      accepted
+          ? '${context.l10n.paired} ${peer.name}.'
+          : context.l10n.notPaired,
     );
   }
 
@@ -5930,7 +6044,9 @@ class _ClipboardHomePageState extends State<ClipboardHomePage>
     final accepted = await _sendPairRequest(peer);
     if (!mounted) return;
     _showCenterSnackBar(
-      accepted ? 'Đã kết nối ${device.name}.' : 'Chưa ghép nối thiết bị.',
+      accepted
+          ? '${context.l10n.paired} ${device.name}.'
+          : context.l10n.notPaired,
     );
   }
 
@@ -5988,14 +6104,15 @@ class _ClipboardHomePageState extends State<ClipboardHomePage>
       context: context,
       builder: (context) {
         final colorScheme = Theme.of(context).colorScheme;
+        final l10n = context.l10n;
         return AlertDialog(
           icon: const Icon(Icons.devices_other_outlined),
-          title: const Text('Ghép thiết bị?'),
+          title: Text(l10n.pairDeviceQuestion),
           content: Column(
             mainAxisSize: MainAxisSize.min,
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Text('${peer.name} muốn ghép nối với OpenCB trên thiết bị này.'),
+              Text('${peer.name} ${l10n.wantsToPairWithThisDevice}'),
               const SizedBox(height: 12),
               Text(
                 '${peer.endpoint} - ${peer.pairCode}',
@@ -6008,11 +6125,11 @@ class _ClipboardHomePageState extends State<ClipboardHomePage>
           actions: [
             TextButton(
               onPressed: () => Navigator.of(context).pop(false),
-              child: const _ButtonLabel('Từ chối'),
+              child: _ButtonLabel(l10n.rejected),
             ),
             FilledButton(
               onPressed: () => Navigator.of(context).pop(true),
-              child: const _ButtonLabel('Ghép nối'),
+              child: _ButtonLabel(l10n.pair),
             ),
           ],
         );
@@ -6090,7 +6207,7 @@ class _ClipboardHomePageState extends State<ClipboardHomePage>
 
   Future<void> _renameLocalDevice() async {
     final name = await _showRenameDeviceDialog(
-      title: 'Đổi tên thiết bị này',
+      title: context.l10n.renameThisDevice,
       initialName: _syncIdentity.deviceName,
     );
     if (name == null) return;
@@ -6129,30 +6246,33 @@ class _ClipboardHomePageState extends State<ClipboardHomePage>
   Future<void> _confirmRemovePeer(SyncPeer peer) async {
     final confirmed = await showDialog<bool>(
       context: context,
-      builder: (context) => AlertDialog(
-        icon: const Icon(Icons.link_off),
-        title: const Text('Xóa thiết bị sync?'),
-        content: Text(
-          'Thiết bị "${peer.name}" sẽ bị xóa khỏi danh sách tin cậy. Nếu thiết bị kia đang online, OpenCB cũng sẽ gỡ kết nối ở bên đó.',
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.of(context).pop(false),
-            child: const _ButtonLabel('Hủy'),
+      builder: (context) {
+        final l10n = context.l10n;
+        return AlertDialog(
+          icon: const Icon(Icons.link_off),
+          title: Text(l10n.removeSyncDeviceTitle),
+          content: Text(
+            '${l10n.removeSyncDeviceBodyPrefix} "${peer.name}" ${l10n.removeSyncDeviceBodySuffix}',
           ),
-          FilledButton(
-            onPressed: () => Navigator.of(context).pop(true),
-            child: const _ButtonLabel('Xóa'),
-          ),
-        ],
-      ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.of(context).pop(false),
+              child: _ButtonLabel(l10n.cancel),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.of(context).pop(true),
+              child: _ButtonLabel(l10n.delete),
+            ),
+          ],
+        );
+      },
     );
     if (confirmed == true) await _removePeer(peer);
   }
 
   Future<void> _renamePeer(SyncPeer peer) async {
     final name = await _showRenameDeviceDialog(
-      title: 'Đổi tên thiết bị',
+      title: context.l10n.renameDevice,
       initialName: peer.name,
     );
     if (name == null) return;
@@ -6163,6 +6283,7 @@ class _ClipboardHomePageState extends State<ClipboardHomePage>
   }
 
   Future<void> _testPeerConnection(SyncPeer peer) async {
+    final l10n = context.l10n;
     final index = _peers.indexWhere((item) => item.id == peer.id);
     Socket? socket;
     try {
@@ -6202,14 +6323,16 @@ class _ClipboardHomePageState extends State<ClipboardHomePage>
         });
       }
       _showCenterSnackBar(
-        gotPong ? 'Ping ${peer.name}!' : 'Kết nối ${peer.name} thành công.',
+        gotPong
+            ? 'Ping ${peer.name}!'
+            : '${peer.name}: ${l10n.connectionSuccess}',
       );
     } catch (error) {
       final message = _friendlySyncError(error);
       if (index >= 0) {
         setState(() => _peers[index] = peer.copyWith(lastError: message));
       }
-      _showCenterSnackBar('Không kết nối được ${peer.name}.');
+      _showCenterSnackBar('${l10n.connectionFailedPrefix} ${peer.name}.');
     } finally {
       await socket?.close();
     }
@@ -6289,7 +6412,9 @@ class _ClipboardHomePageState extends State<ClipboardHomePage>
     unawaited(_pushEntriesToOnlinePeers(updatedEntries, touchExisting: false));
     await _loadEntries();
     if (!mounted) return;
-    _showCenterSnackBar(pinned ? 'Đã ghim các mục đã chọn.' : 'Đã bỏ ghim.');
+    _showCenterSnackBar(
+      pinned ? context.l10n.bulkPinned : context.l10n.bulkUnpinned,
+    );
   }
 
   Future<void> _addTagsToBulkSelectedEntries() async {
@@ -6325,7 +6450,10 @@ class _ClipboardHomePageState extends State<ClipboardHomePage>
     unawaited(_pushEntriesToOnlinePeers(updatedEntries, touchExisting: false));
     await _loadEntries();
     if (!mounted) return;
-    _showCenterSnackBar('Đã gắn thẻ cho ${selectedEntries.length} mục.');
+    final l10n = context.l10n;
+    _showCenterSnackBar(
+      '${l10n.bulkTaggedPrefix} ${_localizedItemCount(l10n, selectedEntries.length)}${l10n.bulkTaggedSuffix}',
+    );
   }
 
   void _sortEntries() {
@@ -6583,10 +6711,11 @@ class _ClipboardHomePageState extends State<ClipboardHomePage>
   }
 
   String _historyListTitle([String? section]) {
+    final l10n = context.l10n;
     return switch (section ?? _section) {
-      'Đã ghim' => 'Clipboard đã ghim',
-      'Thẻ' => 'Clipboard có thẻ',
-      _ => 'Lịch sử clipboard',
+      'Đã ghim' => l10n.pinnedTitle,
+      'Thẻ' => l10n.taggedTitle,
+      _ => l10n.historyTitle,
     };
   }
 
@@ -6594,13 +6723,14 @@ class _ClipboardHomePageState extends State<ClipboardHomePage>
     String? section,
     required bool hasHistoryFilters,
   }) {
+    final l10n = context.l10n;
     if (hasHistoryFilters) {
-      return 'Không có clipboard phù hợp với bộ lọc hiện tại.';
+      return l10n.noMatchingItems;
     }
     return switch (section ?? _section) {
-      'Đã ghim' => 'Chưa có mục nào được ghim.',
-      'Thẻ' => 'Chưa có mục nào có thẻ.',
-      _ => 'Copy bất kỳ văn bản nào trên Windows, nội dung sẽ hiện ở đây.',
+      'Đã ghim' => l10n.noPinnedItems,
+      'Thẻ' => l10n.noTaggedItems,
+      _ => l10n.noClipboardItems,
     };
   }
 
@@ -6820,6 +6950,7 @@ class _ClipboardHomePageState extends State<ClipboardHomePage>
           sourceSuggestions: _knownSourceSuggestions(),
           themeMode: widget.themeMode,
           themePreset: widget.themePreset,
+          language: widget.language,
           androidIgnoringBatteryOptimizations:
               _androidIgnoringBatteryOptimizations,
           onToggleCapture: () {
@@ -6832,6 +6963,7 @@ class _ClipboardHomePageState extends State<ClipboardHomePage>
           onRemoveExcludedSource: _removeExcludedSource,
           onThemeModeChanged: widget.onThemeModeChanged,
           onThemePresetChanged: widget.onThemePresetChanged,
+          onLanguageChanged: widget.onLanguageChanged,
           onOpenDataDirectory: () => unawaited(_openDataDirectory()),
           onExportBackup: () => unawaited(_exportDataBackup()),
           onRestoreBackup: () => unawaited(_restoreDataBackup()),
@@ -6970,14 +7102,15 @@ class _ClipboardHomePageState extends State<ClipboardHomePage>
 
   Widget _buildMobileTopBar({String? section}) {
     final colorScheme = Theme.of(context).colorScheme;
+    final l10n = context.l10n;
     final activeSection = section ?? _section;
     final isClipboardSection = _isClipboardSectionFor(activeSection);
     final showingUpdatePage =
         activeSection == 'Cài đặt' && _settingsUpdatePageOpen;
     final title = switch (activeSection) {
-      'Thiết bị' => 'Thiết bị LAN',
-      'Gửi file' => 'Gửi file',
-      'Cài đặt' => showingUpdatePage ? 'Cập nhật ứng dụng' : 'Cài đặt',
+      'Thiết bị' => l10n.devicesLan,
+      'Gửi file' => l10n.navSendFiles,
+      'Cài đặt' => showingUpdatePage ? l10n.updateApp : l10n.navSettings,
       _ => 'OpenCB',
     };
     if (isClipboardSection) {
@@ -7026,28 +7159,36 @@ class _ClipboardHomePageState extends State<ClipboardHomePage>
   }
 
   Widget _buildMobileScaffold() {
-    final sections = <({IconData icon, IconData selectedIcon, String label})>[
-      (
-        icon: Icons.history_outlined,
-        selectedIcon: Icons.history,
-        label: 'Lịch sử',
-      ),
-      (
-        icon: Icons.compare_arrows_rounded,
-        selectedIcon: Icons.compare_arrows_rounded,
-        label: 'Gửi file',
-      ),
-      (
-        icon: Icons.devices_other_outlined,
-        selectedIcon: Icons.devices_other,
-        label: 'Thiết bị',
-      ),
-      (
-        icon: Icons.settings_outlined,
-        selectedIcon: Icons.settings,
-        label: 'Cài đặt',
-      ),
-    ];
+    final l10n = context.l10n;
+    final sections =
+        <
+          ({IconData icon, IconData selectedIcon, String section, String label})
+        >[
+          (
+            icon: Icons.history_outlined,
+            selectedIcon: Icons.history,
+            section: 'Lịch sử',
+            label: l10n.navHistory,
+          ),
+          (
+            icon: Icons.compare_arrows_rounded,
+            selectedIcon: Icons.compare_arrows_rounded,
+            section: 'Gửi file',
+            label: l10n.navSendFiles,
+          ),
+          (
+            icon: Icons.devices_other_outlined,
+            selectedIcon: Icons.devices_other,
+            section: 'Thiết bị',
+            label: l10n.navDevices,
+          ),
+          (
+            icon: Icons.settings_outlined,
+            selectedIcon: Icons.settings,
+            section: 'Cài đặt',
+            label: l10n.navSettings,
+          ),
+        ];
     final targetIndex = _mobilePageAnimationTargetIndex;
     final mobileSection =
         targetIndex != null &&
@@ -7058,7 +7199,7 @@ class _ClipboardHomePageState extends State<ClipboardHomePage>
         ? _section
         : 'Lịch sử';
     final selectedIndex = sections.indexWhere(
-      (section) => section.label == mobileSection,
+      (section) => section.section == mobileSection,
     );
     Widget buildMobileMainPage(String section) {
       final page = Column(
@@ -7171,7 +7312,7 @@ class _ClipboardHomePageState extends State<ClipboardHomePage>
                                     selectedPosition: selectedPosition,
                                     onSelected: (index) =>
                                         _selectMobileToolbarSection(
-                                          sections[index].label,
+                                          sections[index].section,
                                         ),
                                     onDragPositionChanged:
                                         _updateMobileToolbarDragPosition,
@@ -7323,36 +7464,50 @@ class _Sidebar extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final colorScheme = Theme.of(context).colorScheme;
-    final items = <({IconData icon, IconData selectedIcon, String label})>[
-      (
-        icon: Icons.history_outlined,
-        selectedIcon: Icons.history,
-        label: 'Lịch sử',
-      ),
-      (
-        icon: Icons.bookmark_border,
-        selectedIcon: Icons.bookmark,
-        label: 'Đã ghim',
-      ),
-      (icon: Icons.sell_outlined, selectedIcon: Icons.sell, label: 'Thẻ'),
-      (
-        icon: Icons.compare_arrows_rounded,
-        selectedIcon: Icons.compare_arrows_rounded,
-        label: 'Gửi file',
-      ),
-      (
-        icon: Icons.devices_other_outlined,
-        selectedIcon: Icons.devices_other,
-        label: 'Thiết bị',
-      ),
-      (
-        icon: Icons.settings_outlined,
-        selectedIcon: Icons.settings,
-        label: 'Cài đặt',
-      ),
-    ];
+    final l10n = context.l10n;
+    final items =
+        <
+          ({IconData icon, IconData selectedIcon, String section, String label})
+        >[
+          (
+            icon: Icons.history_outlined,
+            selectedIcon: Icons.history,
+            section: 'Lịch sử',
+            label: l10n.navHistory,
+          ),
+          (
+            icon: Icons.bookmark_border,
+            selectedIcon: Icons.bookmark,
+            section: 'Đã ghim',
+            label: l10n.navPinned,
+          ),
+          (
+            icon: Icons.sell_outlined,
+            selectedIcon: Icons.sell,
+            section: 'Thẻ',
+            label: l10n.navTags,
+          ),
+          (
+            icon: Icons.compare_arrows_rounded,
+            selectedIcon: Icons.compare_arrows_rounded,
+            section: 'Gửi file',
+            label: l10n.navSendFiles,
+          ),
+          (
+            icon: Icons.devices_other_outlined,
+            selectedIcon: Icons.devices_other,
+            section: 'Thiết bị',
+            label: l10n.navDevices,
+          ),
+          (
+            icon: Icons.settings_outlined,
+            selectedIcon: Icons.settings,
+            section: 'Cài đặt',
+            label: l10n.navSettings,
+          ),
+        ];
     final selectedIndex = items.indexWhere(
-      (item) => item.label == currentSection,
+      (item) => item.section == currentSection,
     );
     Widget menuCursor(Widget child) {
       return MouseRegion(cursor: SystemMouseCursors.click, child: child);
@@ -7375,9 +7530,10 @@ class _Sidebar extends StatelessWidget {
                     _CompactSidebarDestination(
                       icon: item.icon,
                       selectedIcon: item.selectedIcon,
+                      section: item.section,
                       label: item.label,
-                      selected: item.label == currentSection,
-                      onPressed: () => onSectionChanged(item.label),
+                      selected: item.section == currentSection,
+                      onPressed: () => onSectionChanged(item.section),
                     ),
                 ],
               ),
@@ -7443,7 +7599,7 @@ class _Sidebar extends StatelessWidget {
                         Tooltip(
                           message: item.label,
                           child: _OpenCbMenuIcon(
-                            label: item.label,
+                            section: item.section,
                             icon: item.icon,
                           ),
                         ),
@@ -7452,7 +7608,7 @@ class _Sidebar extends StatelessWidget {
                         Tooltip(
                           message: item.label,
                           child: _OpenCbMenuIcon(
-                            label: item.label,
+                            section: item.section,
                             icon: item.selectedIcon,
                           ),
                         ),
@@ -7461,7 +7617,7 @@ class _Sidebar extends StatelessWidget {
                     ),
                 ],
                 onDestinationSelected: (index) =>
-                    onSectionChanged(items[index].label),
+                    onSectionChanged(items[index].section),
               ),
             ),
           ),
@@ -7490,6 +7646,7 @@ class _MobileSearchButton extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final colorScheme = Theme.of(context).colorScheme;
+    final l10n = context.l10n;
     final isDark = colorScheme.brightness == Brightness.dark;
     final glassFill = colorScheme.surfaceContainerHigh.withValues(
       alpha: isDark ? 0.58 : 0.46,
@@ -7504,7 +7661,7 @@ class _MobileSearchButton extends StatelessWidget {
     );
     final background = active ? activeFill : glassFill;
     return Tooltip(
-      message: active ? 'Ẩn tìm kiếm' : 'Tìm kiếm',
+      message: active ? l10n.close : l10n.search,
       child: AnimatedContainer(
         duration: const Duration(milliseconds: 220),
         curve: Curves.easeOutCubic,
@@ -7680,6 +7837,7 @@ class _MobileSettingsTopBarTitleState extends State<_MobileSettingsTopBarTitle>
     final titleStyle = Theme.of(
       context,
     ).textTheme.titleLarge?.copyWith(fontWeight: FontWeight.w800);
+    final l10n = context.l10n;
     return SizedBox(
       height: 44,
       child: ClipRect(
@@ -7696,7 +7854,7 @@ class _MobileSettingsTopBarTitleState extends State<_MobileSettingsTopBarTitle>
                     opacity: 1 - (0.18 * value),
                     child: Align(
                       alignment: Alignment.centerLeft,
-                      child: Text('Cài đặt', style: titleStyle),
+                      child: Text(l10n.navSettings, style: titleStyle),
                     ),
                   ),
                 ),
@@ -7707,7 +7865,7 @@ class _MobileSettingsTopBarTitleState extends State<_MobileSettingsTopBarTitle>
                       IconButton(
                         onPressed: widget.onBack,
                         icon: const Icon(Icons.chevron_left_rounded),
-                        tooltip: 'Quay lại',
+                        tooltip: l10n.back,
                         padding: EdgeInsets.zero,
                         constraints: const BoxConstraints.tightFor(
                           width: 40,
@@ -7717,7 +7875,7 @@ class _MobileSettingsTopBarTitleState extends State<_MobileSettingsTopBarTitle>
                       const SizedBox(width: 4),
                       Flexible(
                         child: Text(
-                          'Cập nhật ứng dụng',
+                          l10n.updateApp,
                           maxLines: 1,
                           overflow: TextOverflow.ellipsis,
                           style: titleStyle,
@@ -7751,6 +7909,7 @@ class _MobileInlineSearchBar extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final colorScheme = Theme.of(context).colorScheme;
+    final l10n = context.l10n;
     return SizedBox(
       height: 48,
       child: TextField(
@@ -7760,11 +7919,11 @@ class _MobileInlineSearchBar extends StatelessWidget {
         textInputAction: TextInputAction.search,
         decoration: InputDecoration(
           isDense: true,
-          labelText: 'Tìm kiếm',
+          labelText: l10n.search,
           floatingLabelBehavior: FloatingLabelBehavior.auto,
           prefixIcon: const Icon(Icons.search, size: 20),
           suffixIcon: IconButton(
-            tooltip: 'Xóa tìm kiếm',
+            tooltip: l10n.clearSearch,
             onPressed: onClear,
             icon: const Icon(Icons.close, size: 20),
           ),
@@ -7805,7 +7964,10 @@ class _MobileFloatingToolbar extends StatelessWidget {
     required this.onDragCanceled,
   });
 
-  final List<({IconData icon, IconData selectedIcon, String label})> items;
+  final List<
+    ({IconData icon, IconData selectedIcon, String section, String label})
+  >
+  items;
   final int selectedIndex;
   final double selectedPosition;
   final ValueChanged<int> onSelected;
@@ -8021,6 +8183,7 @@ class _MobileFloatingToolbar extends StatelessWidget {
                                               icon: items[index].icon,
                                               selectedIcon:
                                                   items[index].selectedIcon,
+                                              section: items[index].section,
                                               label: items[index].label,
                                               selected: index == selectedIndex,
                                               showLabel: showLabels,
@@ -8056,6 +8219,7 @@ class _MobileFloatingToolbarItem extends StatelessWidget {
   const _MobileFloatingToolbarItem({
     required this.icon,
     required this.selectedIcon,
+    required this.section,
     required this.label,
     required this.selected,
     required this.showLabel,
@@ -8064,6 +8228,7 @@ class _MobileFloatingToolbarItem extends StatelessWidget {
 
   final IconData icon;
   final IconData selectedIcon;
+  final String section;
   final String label;
   final bool selected;
   final bool showLabel;
@@ -8075,7 +8240,18 @@ class _MobileFloatingToolbarItem extends StatelessWidget {
       curve: Curves.easeOutBack,
       reverseCurve: Curves.easeInCubic,
     );
-    if (label == 'Cài đặt') {
+    if (section == 'Gửi file') {
+      final smooth = CurvedAnimation(
+        parent: animation,
+        curve: Curves.easeOutCubic,
+        reverseCurve: Curves.easeInCubic,
+      );
+      return FadeTransition(
+        opacity: animation,
+        child: ScaleTransition(scale: smooth, child: child),
+      );
+    }
+    if (section == 'Cài đặt') {
       return FadeTransition(
         opacity: animation,
         child: ScaleTransition(scale: curved, child: child),
@@ -8097,7 +8273,7 @@ class _MobileFloatingToolbarItem extends StatelessWidget {
   Widget build(BuildContext context) {
     final colorScheme = Theme.of(context).colorScheme;
     final foreground = selected ? Colors.black : colorScheme.onSurfaceVariant;
-    final iconSize = label == 'Gửi file'
+    final iconSize = section == 'Gửi file'
         ? (selected ? 25.0 : 24.0)
         : (selected ? 21.0 : 20.0);
     return Tooltip(
@@ -8123,27 +8299,23 @@ class _MobileFloatingToolbarItem extends StatelessWidget {
                 mainAxisAlignment: MainAxisAlignment.center,
                 children: [
                   AnimatedSwitcher(
-                    duration: Duration(
-                      milliseconds: label == 'Gửi file' ? 320 : 260,
-                    ),
+                    duration: const Duration(milliseconds: 260),
                     switchInCurve: Curves.easeOutCubic,
                     switchOutCurve: Curves.easeInCubic,
                     transitionBuilder: _buildIconTransition,
                     child: TweenAnimationBuilder<double>(
-                      key: ValueKey('$label-$selected'),
+                      key: ValueKey('$section-$selected'),
                       tween: Tween<double>(
                         begin: 0,
-                        end: selected && label == 'Cài đặt'
+                        end: selected && section == 'Cài đặt'
                             ? 2.5
-                            : selected && label == 'Lịch sử'
+                            : selected && section == 'Lịch sử'
                             ? -1
-                            : selected && label == 'Gửi file'
-                            ? 1.5
+                            : selected && section == 'Gửi file'
+                            ? 1
                             : 0,
                       ),
-                      duration: Duration(
-                        milliseconds: label == 'Gửi file' ? 820 : 620,
-                      ),
+                      duration: const Duration(milliseconds: 620),
                       curve: Curves.easeOutCubic,
                       builder: (context, value, child) {
                         return Transform.rotate(
@@ -8156,7 +8328,7 @@ class _MobileFloatingToolbarItem extends StatelessWidget {
                         duration: const Duration(milliseconds: 240),
                         curve: Curves.easeOutBack,
                         child: _OpenCbMenuIcon(
-                          label: label,
+                          section: section,
                           icon: selected ? selectedIcon : icon,
                           size: iconSize,
                           color: foreground,
@@ -8210,20 +8382,20 @@ class _MobileFloatingToolbarItem extends StatelessWidget {
 
 class _OpenCbMenuIcon extends StatelessWidget {
   const _OpenCbMenuIcon({
-    required this.label,
+    required this.section,
     required this.icon,
     this.size,
     this.color,
   });
 
-  final String label;
+  final String section;
   final IconData icon;
   final double? size;
   final Color? color;
 
   @override
   Widget build(BuildContext context) {
-    if (label != 'Gửi file') {
+    if (section != 'Gửi file') {
       return Icon(icon, size: size, color: color);
     }
     final iconTheme = IconTheme.of(context);
@@ -8244,7 +8416,9 @@ class _OpenCbFileShareIcon extends StatelessWidget {
   Widget build(BuildContext context) {
     return SizedBox.square(
       dimension: size,
-      child: CustomPaint(painter: _OpenCbFileShareIconPainter(color)),
+      child: RepaintBoundary(
+        child: CustomPaint(painter: _OpenCbFileShareIconPainter(color)),
+      ),
     );
   }
 }
@@ -8558,6 +8732,7 @@ class _CompactSidebarDestination extends StatelessWidget {
   const _CompactSidebarDestination({
     required this.icon,
     required this.selectedIcon,
+    required this.section,
     required this.label,
     required this.selected,
     required this.onPressed,
@@ -8565,6 +8740,7 @@ class _CompactSidebarDestination extends StatelessWidget {
 
   final IconData icon;
   final IconData selectedIcon;
+  final String section;
   final String label;
   final bool selected;
   final VoidCallback onPressed;
@@ -8596,7 +8772,7 @@ class _CompactSidebarDestination extends StatelessWidget {
               height: 44,
               child: Center(
                 child: _OpenCbMenuIcon(
-                  label: label,
+                  section: section,
                   icon: selected ? selectedIcon : icon,
                   color: foreground,
                 ),
@@ -8629,19 +8805,20 @@ class _TopBar extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final colorScheme = Theme.of(context).colorScheme;
+    final l10n = context.l10n;
     final isClipboardSection =
         section != 'Thiết bị' && section != 'Gửi file' && section != 'Cài đặt';
     final title = switch (section) {
-      'Thiết bị' => 'Thiết bị LAN',
-      'Gửi file' => 'Gửi file',
-      'Cài đặt' => 'Cài đặt',
-      _ => 'Clipboard',
+      'Thiết bị' => l10n.devicesLan,
+      'Gửi file' => l10n.navSendFiles,
+      'Cài đặt' => l10n.navSettings,
+      _ => l10n.clipboard,
     };
     final subtitle = switch (section) {
       'Thiết bị' => '',
       'Gửi file' => '',
       'Cài đặt' => '',
-      _ => 'Tìm nhanh trong lịch sử clipboard.',
+      _ => l10n.quickClipboardSearch,
     };
     return SizedBox(
       height: isClipboardSection ? 64 : 76,
@@ -8665,7 +8842,7 @@ class _TopBar extends StatelessWidget {
                           textAlignVertical: TextAlignVertical.center,
                           decoration: InputDecoration(
                             isDense: true,
-                            labelText: 'Tìm kiếm',
+                            labelText: l10n.search,
                             floatingLabelBehavior: FloatingLabelBehavior.auto,
                             prefixIcon: const Icon(Icons.search, size: 20),
                             prefixIconConstraints: const BoxConstraints(
@@ -8723,7 +8900,7 @@ class _TopBar extends StatelessWidget {
               if (isClipboardSection) ...[
                 const SizedBox(width: 12),
                 Tooltip(
-                  message: 'Xóa lịch sử chưa ghim',
+                  message: context.l10n.cleanClipboardTitle,
                   child: IconButton.outlined(
                     onPressed: onClearUnpinned,
                     icon: const Icon(Icons.clear_all),
@@ -8734,7 +8911,7 @@ class _TopBar extends StatelessWidget {
                 OutlinedButton.icon(
                   onPressed: onOpenReceivedFolder,
                   icon: const Icon(Icons.folder_open),
-                  label: const Text('Mở folder'),
+                  label: Text(context.l10n.openFolder),
                 ),
               ],
             ],
@@ -9161,18 +9338,18 @@ class _QuickPickerShellState extends State<_QuickPickerShell> {
   String get _emptyMessage {
     final hasQuery = _controller.text.trim().isNotEmpty;
     if (_selectedTagFilters.isNotEmpty && hasQuery) {
-      return 'Không tìm thấy clipboard phù hợp với thẻ đã chọn.';
+      return context.l10n.noMatchingSelectedTags;
     }
     if (_selectedTagFilters.isNotEmpty) {
-      return 'Không có clipboard nào trong thẻ đã chọn.';
+      return context.l10n.noItemsInSelectedTags;
     }
     if (_showPinnedOnly && hasQuery) {
-      return 'Không tìm thấy clipboard đã ghim phù hợp.';
+      return context.l10n.noMatchingPinned;
     }
     if (_showPinnedOnly) {
-      return 'Chưa có clipboard nào được ghim.';
+      return context.l10n.noPinnedItems;
     }
-    return 'Không tìm thấy clipboard phù hợp.';
+    return context.l10n.noMatchingClipboard;
   }
 
   void _toggleTagFilter(String tag) {
@@ -9285,6 +9462,7 @@ class _QuickPickerShellState extends State<_QuickPickerShell> {
   @override
   Widget build(BuildContext context) {
     final colorScheme = Theme.of(context).colorScheme;
+    final l10n = context.l10n;
     final entries = _filteredEntries;
     final availableTags = _availableTags;
     ButtonStyle quickPickerToolButtonStyle({bool active = false}) =>
@@ -9327,7 +9505,7 @@ class _QuickPickerShellState extends State<_QuickPickerShell> {
                                 textInputAction: TextInputAction.search,
                                 decoration: InputDecoration(
                                   isDense: true,
-                                  labelText: 'Tìm',
+                                  labelText: l10n.search,
                                   floatingLabelBehavior:
                                       FloatingLabelBehavior.auto,
                                   prefixIcon: const Icon(
@@ -9335,7 +9513,7 @@ class _QuickPickerShellState extends State<_QuickPickerShell> {
                                     size: 18,
                                   ),
                                   suffixIcon: IconButton(
-                                    tooltip: 'Xóa tìm kiếm',
+                                    tooltip: l10n.clearSearch,
                                     onPressed: _clearAndCollapseSearch,
                                     icon: const Icon(Icons.close, size: 18),
                                   ),
@@ -9375,7 +9553,7 @@ class _QuickPickerShellState extends State<_QuickPickerShell> {
                             ),
                           )
                         : Tooltip(
-                            message: 'Tìm',
+                            message: l10n.search,
                             child: IconButton(
                               style: quickPickerToolButtonStyle(),
                               onPressed: _openSearchField,
@@ -9395,7 +9573,7 @@ class _QuickPickerShellState extends State<_QuickPickerShell> {
                         iconOnlyHorizontalPadding: 0,
                         segments: [
                           _ConnectedButtonSegment(
-                            label: 'Tất cả',
+                            label: l10n.allItems,
                             icon: Icons.all_inclusive,
                             selected: _selectedKindFilter == null,
                             iconOnly: true,
@@ -9403,7 +9581,7 @@ class _QuickPickerShellState extends State<_QuickPickerShell> {
                           ),
                           for (final kind in ClipboardKind.values)
                             _ConnectedButtonSegment(
-                              label: _quickPickerKindLabel(kind),
+                              label: _quickPickerKindLabel(context.l10n, kind),
                               icon: _kindIcon(kind),
                               selected: _selectedKindFilter == kind,
                               iconOnly: true,
@@ -9416,8 +9594,8 @@ class _QuickPickerShellState extends State<_QuickPickerShell> {
                   const SizedBox(width: 8),
                   Tooltip(
                     message: _pinned
-                        ? 'Đang ghim quick picker'
-                        : 'Ghim quick picker',
+                        ? l10n.quickPickerPinned
+                        : l10n.pinQuickPicker,
                     child: IconButton(
                       style: quickPickerToolButtonStyle(active: _pinned),
                       onPressed: _toggleWindowPinned,
@@ -9429,7 +9607,7 @@ class _QuickPickerShellState extends State<_QuickPickerShell> {
                   ),
                   const SizedBox(width: 6),
                   Tooltip(
-                    message: 'Đóng',
+                    message: l10n.close,
                     child: IconButton(
                       style: quickPickerToolButtonStyle(),
                       onPressed: () => unawaited(widget.onClose()),
@@ -9459,8 +9637,8 @@ class _QuickPickerShellState extends State<_QuickPickerShell> {
                   const SizedBox(width: 8),
                   Tooltip(
                     message: _showPinnedOnly
-                        ? 'Hiện tất cả clipboard'
-                        : 'Chỉ hiện mục đã ghim',
+                        ? l10n.showAllClipboards
+                        : l10n.showPinnedOnly,
                     child: IconButton(
                       style: quickPickerToolButtonStyle(
                         active: _showPinnedOnly,
@@ -9479,7 +9657,7 @@ class _QuickPickerShellState extends State<_QuickPickerShell> {
                   ),
                   const SizedBox(width: 6),
                   Tooltip(
-                    message: 'Mở app chính',
+                    message: l10n.openMainApp,
                     child: IconButton(
                       style: quickPickerToolButtonStyle(),
                       onPressed: () => unawaited(widget.onOpenMainApp()),
@@ -9616,7 +9794,7 @@ class _QuickPickerTagFilterBarState extends State<_QuickPickerTagFilterBar> {
                 labelHorizontalPadding: 9,
                 segments: [
                   _ConnectedButtonSegment(
-                    label: 'Tất cả',
+                    label: context.l10n.allItems,
                     icon: Icons.all_inclusive,
                     selected: widget.selectedTags.isEmpty,
                     iconOnly: true,
@@ -9815,7 +9993,7 @@ class _QuickPickerRow extends StatelessWidget {
                                 ],
                                 Expanded(
                                   child: Text(
-                                    '${_quickPickerMetaKindLabel(entry.kind)} - ${_displaySourceLabel(entry.source)}',
+                                    '${_quickPickerMetaKindLabel(context.l10n, entry.kind)} - ${_displaySourceLabel(entry.source)}',
                                     maxLines: 1,
                                     overflow: TextOverflow.ellipsis,
                                     style: Theme.of(context).textTheme.bodySmall
@@ -9863,8 +10041,8 @@ class _QuickPickerRow extends StatelessWidget {
                         const SizedBox(width: 8),
                         Tooltip(
                           message: imageExpanded
-                              ? 'Thu nhỏ preview'
-                              : 'Phóng to preview',
+                              ? context.l10n.collapsePreview
+                              : context.l10n.expandPreview,
                           child: GestureDetector(
                             onTap: onToggleImagePreview,
                             child: _QuickPickerImageThumb(
@@ -9877,8 +10055,8 @@ class _QuickPickerRow extends StatelessWidget {
                       const SizedBox(width: 10),
                       Tooltip(
                         message: entry.pinned
-                            ? 'Bỏ ghim mục này'
-                            : 'Ghim mục này',
+                            ? context.l10n.unpinThisItem
+                            : context.l10n.pinThisItem,
                         child: SizedBox.square(
                           dimension: 32,
                           child: IconButton(
@@ -10033,9 +10211,10 @@ class _QuickPickerContextMenu extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final l10n = context.l10n;
     final openLabel = switch (entry.kind) {
-      ClipboardKind.url => 'Mở URL',
-      ClipboardKind.fileReference => 'Mở thư mục',
+      ClipboardKind.url => l10n.openUrl,
+      ClipboardKind.fileReference => l10n.openFolder,
       _ => null,
     };
     final openIcon = switch (entry.kind) {
@@ -10068,8 +10247,8 @@ class _QuickPickerContextMenu extends StatelessWidget {
           children: [
             _ExpressiveFabMenuAction(
               icon: Icons.copy,
-              label: 'Copy',
-              successLabel: 'Copied',
+              label: l10n.copy,
+              successLabel: l10n.copied,
               actionDelay: const Duration(milliseconds: 220),
               onPressed: onCopy,
             ),
@@ -10084,8 +10263,8 @@ class _QuickPickerContextMenu extends StatelessWidget {
             const SizedBox(height: 8),
             _ExpressiveFabMenuAction(
               icon: Icons.delete_outline,
-              label: 'Xóa',
-              successLabel: 'Đã xóa',
+              label: l10n.delete,
+              successLabel: l10n.deleted,
               actionDelay: const Duration(milliseconds: 260),
               destructive: true,
               onPressed: onDelete,
@@ -10360,6 +10539,7 @@ class _HistoryList extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final colorScheme = Theme.of(context).colorScheme;
+    final l10n = context.l10n;
     final allVisibleSelected =
         entries.isNotEmpty &&
         entries.every((entry) => bulkSelectedIds.contains(entry.id));
@@ -10416,7 +10596,7 @@ class _HistoryList extends StatelessWidget {
                   if (!hideHeaderActions && bulkSelectMode) ...[
                     if (!compact) ...[
                       Text(
-                        '${bulkSelectedIds.length} đã chọn',
+                        '${bulkSelectedIds.length} ${l10n.selected}',
                         style: Theme.of(context).textTheme.labelMedium
                             ?.copyWith(color: colorScheme.onSurfaceVariant),
                       ),
@@ -10424,8 +10604,8 @@ class _HistoryList extends StatelessWidget {
                     ],
                     Tooltip(
                       message: allVisibleSelected
-                          ? 'Bỏ chọn tất cả đang hiển thị'
-                          : 'Chọn tất cả đang hiển thị',
+                          ? l10n.deselectVisible
+                          : l10n.selectVisible,
                       child: IconButton(
                         onPressed: entries.isEmpty
                             ? null
@@ -10447,7 +10627,7 @@ class _HistoryList extends StatelessWidget {
                     ),
                     const SizedBox(width: 4),
                     Tooltip(
-                      message: 'Thoát chọn nhiều',
+                      message: l10n.exitBulkSelect,
                       child: IconButton(
                         onPressed: onToggleBulkSelectMode,
                         icon: const Icon(Icons.close),
@@ -10456,7 +10636,7 @@ class _HistoryList extends StatelessWidget {
                   ] else if (!hideHeaderActions) ...[
                     if (isTagSection) ...[
                       Tooltip(
-                        message: 'Tạo thẻ',
+                        message: l10n.createTag,
                         child: compact
                             ? IconButton.filledTonal(
                                 onPressed: onManageTags,
@@ -10465,21 +10645,21 @@ class _HistoryList extends StatelessWidget {
                             : FilledButton.tonalIcon(
                                 onPressed: onManageTags,
                                 icon: const Icon(Icons.add),
-                                label: const _ButtonLabel('Tạo thẻ'),
+                                label: _ButtonLabel(l10n.createTag),
                               ),
                       ),
                       const SizedBox(width: 8),
                     ],
                     if (!compact) ...[
                       Text(
-                        '${entries.length} mục',
+                        _localizedItemCount(l10n, entries.length),
                         style: Theme.of(context).textTheme.labelMedium
                             ?.copyWith(color: colorScheme.onSurfaceVariant),
                       ),
                       const SizedBox(width: 8),
                     ],
                     Tooltip(
-                      message: 'Chọn nhiều',
+                      message: l10n.selectMultiple,
                       child: IconButton(
                         onPressed: entries.isEmpty
                             ? null
@@ -10489,7 +10669,7 @@ class _HistoryList extends StatelessWidget {
                     ),
                     const SizedBox(width: 4),
                     Tooltip(
-                      message: 'Dọn clipboard',
+                      message: l10n.cleanClipboardTitle,
                       child: IconButton(
                         onPressed: onClearUnpinned,
                         icon: const Icon(Icons.clear_all),
@@ -10515,7 +10695,7 @@ class _HistoryList extends StatelessWidget {
                 : entries.isEmpty
                 ? _EmptyHistory(
                     message: emptyMessage,
-                    actionLabel: isTagSection ? 'Tạo thẻ' : null,
+                    actionLabel: isTagSection ? l10n.createTag : null,
                     actionIcon: isTagSection ? Icons.add : null,
                     onAction: onManageTags,
                   )
@@ -10632,7 +10812,7 @@ class _ScrollToTopHistoryBodyState extends State<_ScrollToTopHistoryBody> {
                   cursor: SystemMouseCursors.click,
                   child: FloatingActionButton(
                     heroTag: null,
-                    tooltip: 'Lên đầu trang',
+                    tooltip: context.l10n.scrollToTop,
                     mini: true,
                     mouseCursor: SystemMouseCursors.click,
                     elevation: 3,
@@ -10749,8 +10929,8 @@ class _BulkActionsFabMenuState extends State<_BulkActionsFabMenu> {
       link: _layerLink,
       child: Tooltip(
         message: widget.enabled
-            ? 'Thao tác với mục đã chọn'
-            : 'Chưa chọn mục nào',
+            ? context.l10n.selectedItemsAction
+            : context.l10n.noSelectedItems,
         child: FloatingActionButton.small(
           heroTag: null,
           elevation: _menuOpen ? 4 : 2,
@@ -10794,6 +10974,7 @@ class _ExpressiveBulkActionMenu extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final l10n = context.l10n;
     return TweenAnimationBuilder<double>(
       tween: Tween(begin: 0, end: 1),
       duration: const Duration(milliseconds: 220),
@@ -10819,26 +11000,26 @@ class _ExpressiveBulkActionMenu extends StatelessWidget {
           children: [
             _ExpressiveFabMenuAction(
               icon: Icons.bookmark_add_outlined,
-              label: 'Ghim',
+              label: l10n.pin,
               onPressed: onPin,
             ),
             const SizedBox(height: 8),
             _ExpressiveFabMenuAction(
               icon: Icons.bookmark_remove_outlined,
-              label: 'Bỏ ghim',
+              label: l10n.unpin,
               onPressed: onUnpin,
             ),
             const SizedBox(height: 8),
             _ExpressiveFabMenuAction(
               icon: Icons.sell_outlined,
-              label: 'Thẻ',
+              label: l10n.tagsAction,
               onPressed: onTags,
             ),
             const SizedBox(height: 8),
             _ExpressiveFabMenuAction(
               icon: Icons.delete_outline,
-              label: 'Xóa',
-              successLabel: 'Đã xóa',
+              label: l10n.delete,
+              successLabel: l10n.deleted,
               actionDelay: const Duration(milliseconds: 320),
               destructive: true,
               onPressed: onDelete,
@@ -10913,6 +11094,9 @@ class _ExpressiveFabMenuActionState extends State<_ExpressiveFabMenuAction> {
   Widget build(BuildContext context) {
     final colorScheme = Theme.of(context).colorScheme;
     final showingFeedback = _showFeedback;
+    final successLabel = widget.successLabel == 'Xong'
+        ? context.l10n.done
+        : widget.successLabel;
     final containerColor = colorScheme.secondaryContainer;
     final contentColor = colorScheme.onSecondaryContainer;
     return AnimatedScale(
@@ -10957,7 +11141,7 @@ class _ExpressiveFabMenuActionState extends State<_ExpressiveFabMenuAction> {
                     opacity: 0,
                     child: _FeedbackLabelRow(
                       icon: Icons.check_circle_outline,
-                      label: widget.successLabel,
+                      label: successLabel,
                       color: contentColor,
                     ),
                   ),
@@ -11118,7 +11302,7 @@ class _HistoryFilterBar extends StatelessWidget {
                   gap: groupGap,
                   segments: [
                     _ConnectedButtonSegment(
-                      label: 'Tất cả',
+                      label: context.l10n.allItems,
                       icon: Icons.all_inclusive,
                       selected: selectedKind == null,
                       iconOnly: iconOnlyCategories,
@@ -11126,7 +11310,7 @@ class _HistoryFilterBar extends StatelessWidget {
                     ),
                     for (final kind in ClipboardKind.values)
                       _ConnectedButtonSegment(
-                        label: _shortKindLabel(kind),
+                        label: _shortKindLabel(context.l10n, kind),
                         icon: _kindIcon(kind),
                         selected: selectedKind == kind,
                         iconOnly: iconOnlyCategories,
@@ -11171,6 +11355,7 @@ class _HistoryScopePillBar extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final colorScheme = Theme.of(context).colorScheme;
+    final l10n = context.l10n;
     final isDark = colorScheme.brightness == Brightness.dark;
     final items =
         <
@@ -11183,19 +11368,19 @@ class _HistoryScopePillBar extends StatelessWidget {
         >[
           (
             value: _HistoryScopeFilter.all,
-            label: 'Tất cả',
+            label: l10n.allItems,
             icon: Icons.all_inclusive,
             selectedIcon: Icons.all_inclusive,
           ),
           (
             value: _HistoryScopeFilter.pinned,
-            label: 'Ghim',
+            label: l10n.pin,
             icon: Icons.bookmark_border,
             selectedIcon: Icons.bookmark,
           ),
           (
             value: _HistoryScopeFilter.tagged,
-            label: 'Gắn thẻ',
+            label: l10n.tagged,
             icon: Icons.sell_outlined,
             selectedIcon: Icons.sell,
           ),
@@ -12070,6 +12255,7 @@ class _ExpressiveClipboardContextMenu extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final l10n = context.l10n;
     return TweenAnimationBuilder<double>(
       tween: Tween(begin: 0, end: 1),
       duration: const Duration(milliseconds: 180),
@@ -12095,28 +12281,28 @@ class _ExpressiveClipboardContextMenu extends StatelessWidget {
           children: [
             _ExpressiveFabMenuAction(
               icon: Icons.copy,
-              label: 'Copy',
-              successLabel: 'Copied',
+              label: l10n.copy,
+              successLabel: l10n.copied,
               actionDelay: const Duration(milliseconds: 260),
               onPressed: onCopy,
             ),
             const SizedBox(height: 8),
             _ExpressiveFabMenuAction(
               icon: pinned ? Icons.bookmark : Icons.bookmark_border,
-              label: pinned ? 'Bỏ ghim' : 'Ghim',
+              label: pinned ? l10n.unpin : l10n.pin,
               onPressed: onTogglePin,
             ),
             const SizedBox(height: 8),
             _ExpressiveFabMenuAction(
               icon: Icons.sell_outlined,
-              label: 'Thẻ',
+              label: l10n.tagsAction,
               onPressed: onEditTags,
             ),
             const SizedBox(height: 8),
             _ExpressiveFabMenuAction(
               icon: Icons.delete_outline,
-              label: 'Xóa',
-              successLabel: 'Đã xóa',
+              label: l10n.delete,
+              successLabel: l10n.deleted,
               actionDelay: const Duration(milliseconds: 320),
               destructive: true,
               onPressed: onDelete,
@@ -12295,7 +12481,7 @@ class _DeleteUndoNoticeContent extends StatelessWidget {
                       visualDensity: VisualDensity.compact,
                     ),
                     child: Text(
-                      'Hoàn tác',
+                      context.l10n.undo,
                       style: Theme.of(context).textTheme.labelMedium?.copyWith(
                         color: colorScheme.primary,
                         fontWeight: FontWeight.w700,
@@ -12342,6 +12528,7 @@ class _DetailPanel extends StatelessWidget {
   Widget build(BuildContext context) {
     final entry = this.entry;
     final colorScheme = Theme.of(context).colorScheme;
+    final l10n = context.l10n;
     final detailActionButtonStyle = FilledButton.styleFrom(
       fixedSize: const Size.fromHeight(38),
       minimumSize: const Size(60, 38),
@@ -12396,7 +12583,7 @@ class _DetailPanel extends StatelessWidget {
                             const SizedBox(width: 10),
                             Flexible(
                               child: Text(
-                                _kindLabel(entry.kind),
+                                _kindLabel(context.l10n, entry.kind),
                                 maxLines: 1,
                                 overflow: TextOverflow.ellipsis,
                                 textHeightBehavior: const TextHeightBehavior(
@@ -12421,19 +12608,19 @@ class _DetailPanel extends StatelessWidget {
                         crossAxisAlignment: WrapCrossAlignment.center,
                         children: [
                           Tooltip(
-                            message: 'Copy vào clipboard',
+                            message: l10n.copyToClipboard,
                             child: _MotionFeedbackButton(
                               onPressed: onRestore,
                               icon: Icons.copy,
-                              label: 'Copy',
-                              successLabel: 'Copied',
+                              label: l10n.copy,
+                              successLabel: l10n.copied,
                               variant: _MotionFeedbackButtonVariant.filledTonal,
                               labelYOffset: compact ? 1 : -1,
                             ),
                           ),
                           if (entry.kind == ClipboardKind.url)
                             Tooltip(
-                              message: 'Mở URL bằng trình duyệt mặc định',
+                              message: l10n.openUrlTooltip,
                               child: compact
                                   ? IconButton.filledTonal(
                                       onPressed: onOpenUrl,
@@ -12444,12 +12631,12 @@ class _DetailPanel extends StatelessWidget {
                                       onPressed: onOpenUrl,
                                       style: detailActionButtonStyle,
                                       icon: const Icon(Icons.open_in_browser),
-                                      label: const _ButtonLabel('Mở URL'),
+                                      label: _ButtonLabel(l10n.openUrl),
                                     ),
                             ),
                           if (entry.kind == ClipboardKind.fileReference)
                             Tooltip(
-                              message: 'Mở thư mục chứa file',
+                              message: l10n.openFileLocationTooltip,
                               child: compact
                                   ? IconButton.filledTonal(
                                       onPressed: onOpenFileLocation,
@@ -12464,7 +12651,7 @@ class _DetailPanel extends StatelessWidget {
                                       icon: const Icon(
                                         Icons.folder_open_outlined,
                                       ),
-                                      label: const _ButtonLabel('Mở thư mục'),
+                                      label: _ButtonLabel(l10n.openFolder),
                                     ),
                             ),
                         ],
@@ -12530,7 +12717,7 @@ class _DetailPanel extends StatelessWidget {
                       return Row(
                         children: [
                           Tooltip(
-                            message: entry.pinned ? 'Bỏ ghim' : 'Ghim',
+                            message: entry.pinned ? l10n.unpin : l10n.pin,
                             child: iconOnlyActions
                                 ? IconButton.filledTonal(
                                     onPressed: onTogglePin,
@@ -12553,13 +12740,15 @@ class _DetailPanel extends StatelessWidget {
                                           : Icons.bookmark_border,
                                     ),
                                     label: _ButtonLabel(
-                                      entry.pinned ? 'Đã ghim' : 'Ghim',
+                                      entry.pinned
+                                          ? l10n.pinnedState
+                                          : l10n.pin,
                                     ),
                                   ),
                           ),
                           const SizedBox(width: 8),
                           Tooltip(
-                            message: 'Thẻ',
+                            message: l10n.tagsAction,
                             child: iconOnlyActions
                                 ? IconButton.filledTonal(
                                     onPressed: onEditTags,
@@ -12573,12 +12762,12 @@ class _DetailPanel extends StatelessWidget {
                                     onPressed: onEditTags,
                                     style: detailActionButtonStyle,
                                     icon: const Icon(Icons.sell_outlined),
-                                    label: const _ButtonLabel('Thẻ'),
+                                    label: _ButtonLabel(l10n.tagsAction),
                                   ),
                           ),
                           const SizedBox(width: 8),
                           Tooltip(
-                            message: 'Xóa clipboard',
+                            message: l10n.deleteClipboard,
                             child: FilledButton.tonalIcon(
                               onPressed: onDelete,
                               style: deleteActionButtonStyle,
@@ -12586,9 +12775,9 @@ class _DetailPanel extends StatelessWidget {
                               label: compact
                                   ? Transform.translate(
                                       offset: const Offset(0, 1),
-                                      child: const _ButtonLabel('Xóa'),
+                                      child: _ButtonLabel(l10n.delete),
                                     )
-                                  : const _ButtonLabel('Xóa'),
+                                  : _ButtonLabel(l10n.delete),
                             ),
                           ),
                           const SizedBox(width: 8),
@@ -12669,11 +12858,9 @@ class _NoSelectionPanel extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return const SizedBox(
+    return SizedBox(
       height: 180,
-      child: Center(
-        child: Text('Chọn một mục clipboard để xem trước và sao chép lại.'),
-      ),
+      child: Center(child: Text(context.l10n.selectClipboardPreview)),
     );
   }
 }
@@ -12810,8 +12997,9 @@ class _TagEditorDialogState extends State<_TagEditorDialog> {
   @override
   Widget build(BuildContext context) {
     final colorScheme = Theme.of(context).colorScheme;
+    final l10n = context.l10n;
     final previewName = _normalizeTagName(_controller.text).isEmpty
-        ? 'thẻ-mới'
+        ? l10n.newTagPreview
         : _normalizeTagName(_controller.text);
     final previewDefinition = TagDefinition(
       name: previewName,
@@ -12823,7 +13011,7 @@ class _TagEditorDialogState extends State<_TagEditorDialog> {
       math.max(280.0, MediaQuery.sizeOf(context).width - 64),
     );
     return AlertDialog(
-      title: Text(widget.libraryOnly ? 'Thư viện thẻ' : 'Gắn thẻ'),
+      title: Text(widget.libraryOnly ? l10n.tagLibrary : l10n.attachTags),
       titlePadding: const EdgeInsets.fromLTRB(20, 16, 20, 8),
       contentPadding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
       actionsPadding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
@@ -12841,10 +13029,10 @@ class _TagEditorDialogState extends State<_TagEditorDialog> {
               children: [
                 if (!widget.libraryOnly) ...[
                   _TagEditorSection(
-                    title: 'Đang gắn',
+                    title: l10n.attachedTags,
                     child: _selectedTags.isEmpty
                         ? Text(
-                            'Chưa có thẻ',
+                            l10n.noTags,
                             style: Theme.of(context).textTheme.bodyMedium
                                 ?.copyWith(color: colorScheme.onSurfaceVariant),
                           )
@@ -12868,10 +13056,10 @@ class _TagEditorDialogState extends State<_TagEditorDialog> {
                   const SizedBox(height: 8),
                 ],
                 _TagEditorSection(
-                  title: 'Thư viện thẻ',
+                  title: l10n.tagLibrary,
                   child: _allTags.isEmpty
                       ? Text(
-                          'Chưa có thẻ',
+                          l10n.noTags,
                           style: Theme.of(context).textTheme.bodyMedium
                               ?.copyWith(color: colorScheme.onSurfaceVariant),
                         )
@@ -12908,7 +13096,7 @@ class _TagEditorDialogState extends State<_TagEditorDialog> {
                 ),
                 const SizedBox(height: 8),
                 _TagEditorSection(
-                  title: 'Tạo/Sửa thẻ',
+                  title: l10n.createEditTag,
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
@@ -12931,22 +13119,20 @@ class _TagEditorDialogState extends State<_TagEditorDialog> {
                                   controller: _controller,
                                   textInputAction: TextInputAction.done,
                                   onSubmitted: (_) => _addOrUpdateTag(),
-                                  decoration: const InputDecoration(
-                                    labelText: 'Tên thẻ',
+                                  decoration: InputDecoration(
+                                    labelText: l10n.tagName,
                                     hintText: 'cong-viec, sync',
                                   ),
                                 ),
                               ),
                               const SizedBox(width: 8),
                               Tooltip(
-                                message: 'Thêm/Cập nhật',
+                                message: l10n.addOrUpdate,
                                 child: showFullButton
                                     ? FilledButton.tonalIcon(
                                         onPressed: _addOrUpdateTag,
                                         icon: const Icon(Icons.add),
-                                        label: const _ButtonLabel(
-                                          'Thêm/Cập nhật',
-                                        ),
+                                        label: _ButtonLabel(l10n.addOrUpdate),
                                       )
                                     : IconButton.filledTonal(
                                         onPressed: _addOrUpdateTag,
@@ -12987,7 +13173,7 @@ class _TagEditorDialogState extends State<_TagEditorDialog> {
                               onSubmitted: (_) => _applyCustomColor(),
                               decoration: InputDecoration(
                                 isDense: true,
-                                labelText: 'Màu tùy chỉnh',
+                                labelText: l10n.customColor,
                                 hintText: '#7C3AED',
                                 prefixIcon: Padding(
                                   padding: const EdgeInsets.all(12),
@@ -13002,7 +13188,7 @@ class _TagEditorDialogState extends State<_TagEditorDialog> {
                                   ),
                                 ),
                                 suffixIcon: IconButton(
-                                  tooltip: 'Áp dụng màu',
+                                  tooltip: l10n.applyColor,
                                   onPressed: _applyCustomColor,
                                   icon: const Icon(Icons.check),
                                 ),
@@ -13029,7 +13215,7 @@ class _TagEditorDialogState extends State<_TagEditorDialog> {
       actions: [
         TextButton(
           onPressed: () => Navigator.of(context).pop(),
-          child: const _ButtonLabel('Hủy'),
+          child: _ButtonLabel(l10n.cancel),
         ),
         FilledButton(
           onPressed: () {
@@ -13042,7 +13228,7 @@ class _TagEditorDialogState extends State<_TagEditorDialog> {
               ),
             );
           },
-          child: const _ButtonLabel('Lưu'),
+          child: _ButtonLabel(l10n.save),
         ),
       ],
     );
@@ -13191,6 +13377,7 @@ class _AttachedTagChip extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final colorScheme = Theme.of(context).colorScheme;
+    final l10n = context.l10n;
     final tagColor = definition?.color ?? colorScheme.tertiary;
     final containerColor = Color.alphaBlend(
       tagColor.withValues(alpha: 0.16),
@@ -13214,7 +13401,7 @@ class _AttachedTagChip extends StatelessWidget {
         _TagGroupDivider(color: tagColor.withValues(alpha: 0.36)),
         _TagGroupIconButton(
           icon: Icons.close,
-          tooltip: 'Bỏ thẻ',
+          tooltip: l10n.removeTag,
           backgroundColor: containerColor,
           foregroundColor: colorScheme.onSurfaceVariant,
           borderRadius: const BorderRadius.horizontal(
@@ -13249,6 +13436,7 @@ class _TagLibraryChip extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final colorScheme = Theme.of(context).colorScheme;
+    final l10n = context.l10n;
     final tagColor = definition?.color ?? colorScheme.tertiary;
     final borderColor = selected
         ? tagColor.withValues(alpha: 0.56)
@@ -13282,7 +13470,7 @@ class _TagLibraryChip extends StatelessWidget {
         _TagGroupDivider(color: borderColor),
         _TagGroupIconButton(
           icon: Icons.edit_outlined,
-          tooltip: 'Sửa màu và icon',
+          tooltip: l10n.editTag,
           backgroundColor: containerColor,
           foregroundColor: colorScheme.onSurfaceVariant,
           borderRadius: BorderRadius.zero,
@@ -13291,7 +13479,7 @@ class _TagLibraryChip extends StatelessWidget {
         _TagGroupDivider(color: borderColor),
         _TagGroupIconButton(
           icon: Icons.delete_outline,
-          tooltip: 'Xóa thẻ',
+          tooltip: l10n.deleteTag,
           backgroundColor: containerColor,
           foregroundColor: colorScheme.error,
           borderRadius: const BorderRadius.horizontal(
@@ -13501,14 +13689,15 @@ class _RenameDeviceDialogState extends State<_RenameDeviceDialog> {
 
   @override
   Widget build(BuildContext context) {
+    final l10n = context.l10n;
     return AlertDialog(
       icon: const Icon(Icons.drive_file_rename_outline),
       title: Text(widget.title),
       content: TextField(
         controller: _controller,
         autofocus: true,
-        decoration: const InputDecoration(
-          labelText: 'Tên thiết bị',
+        decoration: InputDecoration(
+          labelText: l10n.deviceName,
           border: OutlineInputBorder(),
         ),
         onSubmitted: (_) => _submit(),
@@ -13516,9 +13705,9 @@ class _RenameDeviceDialogState extends State<_RenameDeviceDialog> {
       actions: [
         TextButton(
           onPressed: () => Navigator.of(context).pop(),
-          child: const _ButtonLabel('Hủy'),
+          child: _ButtonLabel(l10n.cancel),
         ),
-        FilledButton(onPressed: _submit, child: const _ButtonLabel('Lưu')),
+        FilledButton(onPressed: _submit, child: _ButtonLabel(l10n.save)),
       ],
     );
   }
@@ -13625,8 +13814,7 @@ class _AddPeerDialogState extends State<_AddPeerDialog> {
     final parsed = _parsePairPayload(value);
     if (parsed == null) {
       setState(() {
-        _payloadError =
-            'Payload không hợp lệ. Hãy dán mã bắt đầu bằng opencb://pair.';
+        _payloadError = context.l10n.pairPayloadInvalid;
       });
       return;
     }
@@ -13649,7 +13837,7 @@ class _AddPeerDialogState extends State<_AddPeerDialog> {
   void _submit() {
     final parsed = _parseEndpoint(_endpointController.text);
     if (parsed == null) {
-      setState(() => _payloadError = 'Host và port không hợp lệ.');
+      setState(() => _payloadError = context.l10n.hostPortInvalid);
       return;
     }
     final pairCode = _pairCodeController.text
@@ -13657,7 +13845,7 @@ class _AddPeerDialogState extends State<_AddPeerDialog> {
         .replaceAll(RegExp(r'\s+'), '')
         .toUpperCase();
     if (pairCode.length < 6) {
-      setState(() => _payloadError = 'Mã pairing phải có ít nhất 6 ký tự.');
+      setState(() => _payloadError = context.l10n.pairCodeTooShort);
       return;
     }
     Navigator.of(context).pop(
@@ -13675,8 +13863,9 @@ class _AddPeerDialogState extends State<_AddPeerDialog> {
 
   @override
   Widget build(BuildContext context) {
+    final l10n = context.l10n;
     return AlertDialog(
-      title: const Text('Thêm thiết bị LAN'),
+      title: Text(l10n.addLanDevice),
       content: SizedBox(
         width: 460,
         child: SingleChildScrollView(
@@ -13690,8 +13879,8 @@ class _AddPeerDialogState extends State<_AddPeerDialog> {
                   maxLines: 1,
                   decoration: _compactRoundedInputDecoration(
                     context,
-                    labelText: 'Payload pairing',
-                    hintText: 'Dán opencb://pair?... từ máy kia',
+                    labelText: l10n.pairPayload,
+                    hintText: l10n.pastePairPayloadHint,
                   ).copyWith(errorText: _payloadError),
                   onSubmitted: (_) => _applyPairPayload(),
                 ),
@@ -13706,13 +13895,13 @@ class _AddPeerDialogState extends State<_AddPeerDialog> {
                     FilledButton.tonalIcon(
                       onPressed: _applyPairPayload,
                       icon: const Icon(Icons.auto_fix_high_outlined),
-                      label: const _ButtonLabel('Áp dụng payload'),
+                      label: _ButtonLabel(l10n.applyPayload),
                     ),
                     if (Platform.isAndroid)
                       OutlinedButton.icon(
                         onPressed: _scanQrPayload,
                         icon: const Icon(Icons.qr_code_scanner),
-                        label: const _OffsetButtonLabel('Quét QR', y: 1),
+                        label: _OffsetButtonLabel(l10n.scanQr, y: 1),
                       ),
                   ],
                 ),
@@ -13722,13 +13911,13 @@ class _AddPeerDialogState extends State<_AddPeerDialog> {
               const SizedBox(height: 12),
               TextField(
                 controller: _nameController,
-                decoration: const InputDecoration(labelText: 'Tên thiết bị'),
+                decoration: InputDecoration(labelText: l10n.deviceName),
               ),
               const SizedBox(height: 12),
               TextField(
                 controller: _endpointController,
-                decoration: const InputDecoration(
-                  labelText: 'Host và port',
+                decoration: InputDecoration(
+                  labelText: l10n.hostAndPort,
                   hintText: '192.168.1.10:47873',
                 ),
               ),
@@ -13736,8 +13925,8 @@ class _AddPeerDialogState extends State<_AddPeerDialog> {
               TextField(
                 controller: _pairCodeController,
                 textCapitalization: TextCapitalization.characters,
-                decoration: const InputDecoration(
-                  labelText: 'Mã pairing của thiết bị kia',
+                decoration: InputDecoration(
+                  labelText: l10n.peerPairCode,
                   hintText: 'VD: A1B2C3D4',
                 ),
               ),
@@ -13748,9 +13937,9 @@ class _AddPeerDialogState extends State<_AddPeerDialog> {
       actions: [
         TextButton(
           onPressed: () => Navigator.of(context).pop(),
-          child: const _ButtonLabel('Hủy'),
+          child: _ButtonLabel(l10n.cancel),
         ),
-        FilledButton(onPressed: _submit, child: const _ButtonLabel('Thêm')),
+        FilledButton(onPressed: _submit, child: _ButtonLabel(l10n.add)),
       ],
     );
   }
@@ -13789,7 +13978,7 @@ class _ConfirmDiscoveredPeerDialogState
         .replaceAll(RegExp(r'\s+'), '')
         .toUpperCase();
     if (code.length < 6) {
-      setState(() => _errorText = 'Nhập mã đang hiển thị trên thiết bị kia.');
+      setState(() => _errorText = context.l10n.enterCodeShownOnPeer);
       return;
     }
     Navigator.of(context).pop(widget.device.toPeer(pairCode: code));
@@ -13800,11 +13989,11 @@ class _ConfirmDiscoveredPeerDialogState
     if (payload == null || !mounted) return;
     final peer = _parsePairPayload(payload);
     if (peer == null) {
-      setState(() => _errorText = 'QR pairing không hợp lệ.');
+      setState(() => _errorText = context.l10n.invalidQrPairing);
       return;
     }
     if (peer.id != widget.device.id) {
-      setState(() => _errorText = 'QR này thuộc thiết bị khác.');
+      setState(() => _errorText = context.l10n.qrBelongsToOtherDevice);
       return;
     }
     Navigator.of(context).pop(peer);
@@ -13812,9 +14001,10 @@ class _ConfirmDiscoveredPeerDialogState
 
   @override
   Widget build(BuildContext context) {
+    final l10n = context.l10n;
     return AlertDialog(
       icon: const Icon(Icons.verified_user_outlined),
-      title: const Text('Xác nhận kết nối'),
+      title: Text(l10n.confirmConnection),
       content: SizedBox(
         width: 420,
         child: Column(
@@ -13831,7 +14021,7 @@ class _ConfirmDiscoveredPeerDialogState
               autofocus: true,
               textCapitalization: TextCapitalization.characters,
               decoration: InputDecoration(
-                labelText: 'Mã trên thiết bị kia',
+                labelText: l10n.codeOnPeer,
                 hintText: 'VD: A1B2C3D4',
                 errorText: _errorText,
               ),
@@ -13842,10 +14032,7 @@ class _ConfirmDiscoveredPeerDialogState
               OutlinedButton.icon(
                 onPressed: _scanQr,
                 icon: const Icon(Icons.qr_code_scanner),
-                label: const _OffsetButtonLabel(
-                  'Quét QR thay vì nhập mã',
-                  y: 1,
-                ),
+                label: _OffsetButtonLabel(l10n.scanQrInstead, y: 1),
               ),
             ],
           ],
@@ -13854,11 +14041,11 @@ class _ConfirmDiscoveredPeerDialogState
       actions: [
         TextButton(
           onPressed: () => Navigator.of(context).pop(),
-          child: const _ButtonLabel('Hủy'),
+          child: _ButtonLabel(l10n.cancel),
         ),
         FilledButton(
           onPressed: _submitCode,
-          child: const _OffsetButtonLabel('Kết nối', y: 1),
+          child: _OffsetButtonLabel(l10n.connect, y: 1),
         ),
       ],
     );
@@ -13909,7 +14096,7 @@ class _PairQrScannerDialogState extends State<_PairQrScannerDialog> {
       360.0,
     );
     return AlertDialog(
-      title: const Text('Quét QR pairing'),
+      title: Text(context.l10n.scanQr),
       contentPadding: const EdgeInsets.fromLTRB(24, 16, 24, 8),
       content: SizedBox.square(
         dimension: dialogWidth,
@@ -13955,7 +14142,7 @@ class _PairQrScannerDialogState extends State<_PairQrScannerDialog> {
       actions: [
         TextButton(
           onPressed: () => Navigator.of(context).pop(),
-          child: const _ButtonLabel('Hủy'),
+          child: _ButtonLabel(context.l10n.cancel),
         ),
       ],
     );
@@ -14017,6 +14204,7 @@ class _FileTransferPage extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final l10n = context.l10n;
     final colorScheme = Theme.of(context).colorScheme;
     final mobile = MediaQuery.sizeOf(context).width < _mobileLayoutBreakpoint;
     final sortedTransfers = List<FileTransferRecord>.from(transfers)
@@ -14038,12 +14226,12 @@ class _FileTransferPage extends StatelessWidget {
       (sum, file) => sum + file.size,
     );
     final contentSection = _SectionSurface(
-      title: 'Nội dung gửi',
+      title: l10n.sendFilesContent,
       trailing: selectedFiles.isEmpty
           ? null
           : _MiniChip(
               label:
-                  '${selectedFiles.length} file - ${_formatBytes(totalBytes)}',
+                  '${_localizedFileCount(l10n, selectedFiles.length)} - ${_formatBytes(totalBytes)}',
               timeTone: true,
             ),
       child: _FileTransferDropZone(
@@ -14058,7 +14246,7 @@ class _FileTransferPage extends StatelessWidget {
       ),
     );
     final deviceSection = _SectionSurface(
-      title: 'Chọn thiết bị nhận',
+      title: l10n.chooseReceivingDevice,
       trailing: Row(
         mainAxisSize: MainAxisSize.min,
         children: [
@@ -14067,8 +14255,8 @@ class _FileTransferPage extends StatelessWidget {
               onPressed: onToggleAllPeers,
               child: Text(
                 selectedPeerIds.containsAll(peers.map((peer) => peer.id))
-                    ? 'Bỏ chọn'
-                    : 'Tất cả',
+                    ? l10n.deselect
+                    : l10n.allItems,
               ),
             ),
         ],
@@ -14076,11 +14264,10 @@ class _FileTransferPage extends StatelessWidget {
       child: Column(
         children: [
           peers.isEmpty
-              ? const _FileTransferNotice(
+              ? _FileTransferNotice(
                   icon: Icons.devices_other_outlined,
-                  title: 'Chưa có thiết bị online',
-                  message:
-                      'Mở OpenCB trên thiết bị đã ghép nối trong cùng Wi-Fi/VPN.',
+                  title: l10n.noOnlineDevices,
+                  message: l10n.openPairedDevicesWifi,
                 )
               : Column(
                   children: [
@@ -14105,8 +14292,8 @@ class _FileTransferPage extends StatelessWidget {
               icon: const Icon(Icons.send),
               label: Text(
                 selectedOnlinePeers.length <= 1
-                    ? 'Gửi'
-                    : 'Gửi tới ${selectedOnlinePeers.length} thiết bị',
+                    ? l10n.send
+                    : '${l10n.sendTo} ${_localizedDeviceCount(l10n, selectedOnlinePeers.length)}',
               ),
             ),
           ),
@@ -14117,10 +14304,10 @@ class _FileTransferPage extends StatelessWidget {
       padding: EdgeInsets.fromLTRB(20, 0, 20, mobile ? 104 : 20),
       children: [
         if (!lanSyncEnabled) ...[
-          const _FileTransferNotice(
+          _FileTransferNotice(
             icon: Icons.sync_disabled,
-            title: 'Sync LAN đang tắt',
-            message: 'Bật Sync LAN để thấy thiết bị và gửi file trong mạng.',
+            title: l10n.lanSyncOff,
+            message: l10n.enableLanToSendFiles,
           ),
           const SizedBox(height: 12),
         ],
@@ -14143,17 +14330,17 @@ class _FileTransferPage extends StatelessWidget {
           ),
         const SizedBox(height: 14),
         _SectionSurface(
-          title: 'Hoạt động gửi nhận',
+          title: l10n.sendReceiveActivity,
           trailing: Row(
             mainAxisSize: MainAxisSize.min,
             children: [
               _MiniChip(
-                label: '${filteredTransfers.length} mục',
+                label: _localizedItemCount(l10n, filteredTransfers.length),
                 timeTone: true,
               ),
               const SizedBox(width: 8),
               IconButton(
-                tooltip: 'Dọn lịch sử gửi nhận',
+                tooltip: l10n.clearTransferHistory,
                 onPressed: finishedTransferCount > 0
                     ? onClearTransferHistory
                     : null,
@@ -14173,11 +14360,11 @@ class _FileTransferPage extends StatelessWidget {
                   ? _FileTransferNotice(
                       icon: Icons.swap_horiz,
                       title: statusFilter == null
-                          ? 'Chưa có transfer'
-                          : 'Không có mục ${_fileTransferStatusLabel(statusFilter!).toLowerCase()}',
+                          ? l10n.noTransfers
+                          : '${l10n.noTransferWithStatus} ${_fileTransferStatusLabel(l10n, statusFilter!).toLowerCase()}',
                       message: statusFilter == null
-                          ? 'Chọn một thiết bị online để gửi file.'
-                          : 'Đổi bộ lọc để xem hoạt động gửi nhận khác.',
+                          ? l10n.chooseOnlineDeviceToSend
+                          : l10n.changeFilterToViewTransfers,
                     )
                   : Column(
                       children: [
@@ -14309,21 +14496,22 @@ class _FileTransferStatusToolbar extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final l10n = context.l10n;
     final items = <({FileTransferStatus? status, String label, IconData icon})>[
-      (status: null, label: 'Tất cả', icon: Icons.all_inbox_outlined),
+      (status: null, label: l10n.allItems, icon: Icons.all_inbox_outlined),
       (
         status: FileTransferStatus.completed,
-        label: 'Hoàn tất',
+        label: l10n.completed,
         icon: Icons.check_circle_outline,
       ),
       (
         status: FileTransferStatus.rejected,
-        label: 'Từ chối',
+        label: l10n.rejected,
         icon: Icons.block_outlined,
       ),
       (
         status: FileTransferStatus.failed,
-        label: 'Lỗi',
+        label: l10n.error,
         icon: Icons.error_outline,
       ),
     ];
@@ -14427,13 +14615,14 @@ class _FileTransferDropZone extends StatelessWidget {
     final colorScheme = Theme.of(context).colorScheme;
     final mobile = MediaQuery.sizeOf(context).width < _mobileLayoutBreakpoint;
     final useMobileHeader = Platform.isAndroid || mobile;
+    final l10n = context.l10n;
     final description = selectedFiles.isEmpty
         ? Platform.isWindows
-              ? 'Kéo file hoặc folder vào đây, hoặc chọn bên dưới.'
-              : 'Chọn file để gửi.'
+              ? l10n.dragFilesHere
+              : l10n.chooseFileToSend
         : Platform.isAndroid
-        ? 'Thêm file khác vào danh sách gửi.'
-        : 'Thêm file hoặc folder khác vào danh sách gửi.';
+        ? l10n.addMoreFiles
+        : l10n.addMoreFilesOrFolders;
     final pickButtonStyle = OutlinedButton.styleFrom(
       fixedSize: const Size.fromHeight(40),
       minimumSize: const Size(0, 40),
@@ -14478,7 +14667,7 @@ class _FileTransferDropZone extends StatelessWidget {
                 OutlinedButton.icon(
                   onPressed: onPickFiles,
                   icon: const Icon(Icons.attach_file, size: 18),
-                  label: const _OffsetButtonLabel('Chọn file', y: 1),
+                  label: _OffsetButtonLabel(l10n.chooseFile, y: 1),
                   style: pickButtonStyle,
                 ),
               ],
@@ -14510,14 +14699,14 @@ class _FileTransferDropZone extends StatelessWidget {
                 OutlinedButton.icon(
                   onPressed: onPickFiles,
                   icon: const Icon(Icons.attach_file),
-                  label: const _OffsetButtonLabel('Chọn file', y: 1),
+                  label: _OffsetButtonLabel(l10n.chooseFile, y: 1),
                   style: pickButtonStyle,
                 ),
                 if (!Platform.isAndroid)
                   OutlinedButton.icon(
                     onPressed: onPickFolder,
                     icon: const Icon(Icons.folder_open),
-                    label: const _ButtonLabel('Chọn folder'),
+                    label: _ButtonLabel(l10n.chooseFolder),
                     style: pickButtonStyle,
                   ),
               ],
@@ -14584,6 +14773,7 @@ class _SelectedTransferFilesInlineListState
   @override
   Widget build(BuildContext context) {
     final colorScheme = Theme.of(context).colorScheme;
+    final l10n = context.l10n;
     final shouldScroll = widget.files.length > 4;
     final fileList = Column(
       mainAxisSize: MainAxisSize.min,
@@ -14605,7 +14795,7 @@ class _SelectedTransferFilesInlineListState
             ),
             subtitle: Text(_formatBytes(file.size)),
             trailing: IconButton(
-              tooltip: 'Bỏ file',
+              tooltip: l10n.removeFile,
               onPressed: () => widget.onRemove(file),
               icon: const Icon(Icons.close),
             ),
@@ -14617,7 +14807,7 @@ class _SelectedTransferFilesInlineListState
         Row(
           children: [
             Text(
-              'Đã chọn',
+              l10n.selectedFiles,
               style: Theme.of(
                 context,
               ).textTheme.titleSmall?.copyWith(fontWeight: FontWeight.w800),
@@ -14626,7 +14816,7 @@ class _SelectedTransferFilesInlineListState
             TextButton.icon(
               onPressed: widget.onClear,
               icon: const Icon(Icons.clear_all),
-              label: const Text('Xóa danh sách'),
+              label: Text(l10n.clearList),
             ),
           ],
         ),
@@ -14710,12 +14900,13 @@ class _FileTransferRecordTile extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final colorScheme = Theme.of(context).colorScheme;
+    final l10n = context.l10n;
     final fileLabel = transfer.files.length == 1
         ? transfer.files.first.displayPath
-        : '${transfer.files.length} file';
+        : _localizedFileCount(l10n, transfer.files.length);
     final directionLabel = transfer.direction == FileTransferDirection.send
-        ? 'Gửi tới'
-        : 'Nhận từ';
+        ? l10n.sendTo
+        : l10n.receiveFrom;
     final supportingPath = transfer.error ?? transfer.saveDirectory;
     return Padding(
       padding: const EdgeInsets.symmetric(vertical: 8),
@@ -14787,7 +14978,7 @@ class _FileTransferRecordTile extends StatelessWidget {
                   children: [
                     Text(
                       '${_formatBytes(transfer.transferredBytes)} / ${_formatBytes(transfer.totalBytes)}'
-                      '${_isActiveTransferStatus(transfer.status) ? ' • ${_formatTransferSpeed(transfer.speedBytesPerSecond)}' : ''}',
+                      '${_isActiveTransferStatus(transfer.status) ? ' • ${_formatTransferSpeed(transfer.speedBytesPerSecond, l10n)}' : ''}',
                       style: Theme.of(context).textTheme.bodySmall?.copyWith(
                         color: colorScheme.onSurfaceVariant,
                       ),
@@ -14816,14 +15007,14 @@ class _FileTransferRecordTile extends StatelessWidget {
                   children: [
                     if (onOpenFile != null)
                       IconButton(
-                        tooltip: 'Mở file',
+                        tooltip: l10n.openFile,
                         onPressed: onOpenFile,
                         visualDensity: VisualDensity.compact,
                         icon: const Icon(Icons.open_in_new),
                       ),
                     if (onCancel != null)
                       IconButton(
-                        tooltip: 'Hủy transfer',
+                        tooltip: l10n.cancel,
                         onPressed: onCancel,
                         visualDensity: VisualDensity.compact,
                         icon: const Icon(Icons.close),
@@ -14865,7 +15056,7 @@ class _FileTransferStatusBadge extends StatelessWidget {
       ),
     };
     return _M3Badge(
-      label: _fileTransferStatusLabel(status),
+      label: _fileTransferStatusLabel(context.l10n, status),
       tone: _M3BadgeTone.primary,
       horizontalPadding: 8,
       tightText: true,
@@ -15017,6 +15208,7 @@ class _PairingActionsCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final colorScheme = Theme.of(context).colorScheme;
+    final l10n = context.l10n;
     final scanQr = onScanPairQr;
     final actionButtons = Row(
       mainAxisSize: MainAxisSize.min,
@@ -15025,13 +15217,13 @@ class _PairingActionsCard extends StatelessWidget {
           FilledButton.tonalIcon(
             onPressed: onAddPeer,
             icon: const Icon(Icons.keyboard_alt_outlined),
-            label: const _ButtonLabel('Nhập payload'),
+            label: _ButtonLabel(l10n.enterPayload),
           )
         else
           FilledButton.tonalIcon(
             onPressed: scanQr,
             icon: const Icon(Icons.qr_code_scanner),
-            label: const _OffsetButtonLabel('Quét QR', y: 1),
+            label: _OffsetButtonLabel(l10n.scanQr, y: 1),
           ),
       ],
     );
@@ -15046,7 +15238,7 @@ class _PairingActionsCard extends StatelessWidget {
             const SizedBox(width: 10),
             Expanded(
               child: Text(
-                'Ghép thiết bị mới',
+                l10n.devicePairing,
                 maxLines: 1,
                 overflow: TextOverflow.ellipsis,
                 style: Theme.of(
@@ -15091,11 +15283,15 @@ class _TrustedDevicesCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final colorScheme = Theme.of(context).colorScheme;
+    final l10n = context.l10n;
     return _SettingsCard(
       icon: Icons.verified_user_outlined,
-      title: 'Thiết bị đã ghép',
+      title: l10n.pairedDevices,
       subtitle: '',
-      trailing: _MiniChip(label: '${peers.length} thiết bị', labelYOffset: 0),
+      trailing: _MiniChip(
+        label: _localizedDeviceCount(l10n, peers.length),
+        labelYOffset: 0,
+      ),
       child: peers.isEmpty
           ? Container(
               width: double.infinity,
@@ -15110,14 +15306,14 @@ class _TrustedDevicesCard extends StatelessWidget {
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   Text(
-                    'Chưa ghép thiết bị LAN nào.',
+                    l10n.noPairedDevices,
                     style: Theme.of(context).textTheme.labelLarge?.copyWith(
                       fontWeight: FontWeight.w800,
                     ),
                   ),
                   const SizedBox(height: 4),
                   Text(
-                    'Khi thiết bị được xác nhận bằng mã hoặc QR, thiết bị sẽ xuất hiện ở đây.',
+                    l10n.pairedDeviceHint,
                     style: Theme.of(context).textTheme.bodySmall?.copyWith(
                       color: colorScheme.onSurfaceVariant,
                     ),
@@ -15128,7 +15324,7 @@ class _TrustedDevicesCard extends StatelessWidget {
                     child: FilledButton.tonalIcon(
                       onPressed: onAddPeer,
                       icon: const Icon(Icons.add_link),
-                      label: const _ButtonLabel('Thêm thiết bị'),
+                      label: _ButtonLabel(l10n.addDevice),
                     ),
                   ),
                 ],
@@ -15251,6 +15447,7 @@ class _SettingsPage extends StatelessWidget {
     required this.sourceSuggestions,
     required this.themeMode,
     required this.themePreset,
+    required this.language,
     required this.androidIgnoringBatteryOptimizations,
     required this.onToggleCapture,
     required this.onRetentionLimitChanged,
@@ -15259,6 +15456,7 @@ class _SettingsPage extends StatelessWidget {
     required this.onRemoveExcludedSource,
     required this.onThemeModeChanged,
     required this.onThemePresetChanged,
+    required this.onLanguageChanged,
     required this.onOpenDataDirectory,
     required this.onExportBackup,
     required this.onRestoreBackup,
@@ -15275,6 +15473,7 @@ class _SettingsPage extends StatelessWidget {
   final List<String> sourceSuggestions;
   final ThemeMode themeMode;
   final M3ThemePreset themePreset;
+  final AppLanguage language;
   final bool androidIgnoringBatteryOptimizations;
   final VoidCallback onToggleCapture;
   final ValueChanged<int> onRetentionLimitChanged;
@@ -15283,6 +15482,7 @@ class _SettingsPage extends StatelessWidget {
   final ValueChanged<String> onRemoveExcludedSource;
   final ValueChanged<ThemeMode> onThemeModeChanged;
   final ValueChanged<M3ThemePreset> onThemePresetChanged;
+  final ValueChanged<AppLanguage> onLanguageChanged;
   final VoidCallback onOpenDataDirectory;
   final VoidCallback onExportBackup;
   final VoidCallback onRestoreBackup;
@@ -15309,8 +15509,8 @@ class _SettingsPage extends StatelessWidget {
           if (onOpenDevices != null) ...[
             _SettingsNavigationRow(
               icon: Icons.devices_other_outlined,
-              title: 'Thiết bị LAN',
-              subtitle: 'Ghép thiết bị, quét QR và quản lý sync.',
+              title: context.l10n.devicesLan,
+              subtitle: context.l10n.settingsDevicesSubtitle,
               onTap: onOpenDevices!,
             ),
             const SizedBox(height: 16),
@@ -15336,8 +15536,10 @@ class _SettingsPage extends StatelessWidget {
               Widget buildThemeSettingsPanel() => _ThemeSettingsPanel(
                 themeMode: themeMode,
                 selectedPreset: themePreset,
+                language: language,
                 onThemeModeChanged: onThemeModeChanged,
                 onThemePresetChanged: onThemePresetChanged,
+                onLanguageChanged: onLanguageChanged,
               );
 
               final leftColumn = buildClipboardSettingsPanel();
@@ -15406,7 +15608,7 @@ class _AppUpdateSummaryCard extends StatelessWidget {
                     ),
                     const SizedBox(height: 2),
                     Text(
-                      'Nhấn vào để mở cài đặt cập nhật',
+                      context.l10n.openUpdateSettings,
                       maxLines: 1,
                       overflow: TextOverflow.ellipsis,
                       style: Theme.of(context).textTheme.bodySmall?.copyWith(
@@ -15452,6 +15654,7 @@ class _UpdateSettingsPage extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final colorScheme = Theme.of(context).colorScheme;
+    final l10n = context.l10n;
     final mobile = MediaQuery.sizeOf(context).width < _mobileLayoutBreakpoint;
     final pagePadding = EdgeInsets.fromLTRB(24, mobile ? 0 : 18, 24, 24);
     final content = Column(
@@ -15463,11 +15666,11 @@ class _UpdateSettingsPage extends StatelessWidget {
               IconButton.filledTonal(
                 onPressed: onBack,
                 icon: const Icon(Icons.chevron_left_rounded),
-                tooltip: 'Quay lại',
+                tooltip: l10n.back,
               ),
               const SizedBox(width: 10),
               Text(
-                'Cập nhật ứng dụng',
+                l10n.updateApp,
                 style: Theme.of(
                   context,
                 ).textTheme.titleLarge?.copyWith(fontWeight: FontWeight.w800),
@@ -15518,7 +15721,7 @@ class _UpdateSettingsPage extends StatelessWidget {
                     IconButton.filledTonal(
                       onPressed: checking ? null : onCheckNow,
                       icon: _DirectorySyncIcon(checking: checking),
-                      tooltip: 'Check cập nhật',
+                      tooltip: l10n.checkUpdates,
                     ),
                   ],
                 ),
@@ -15526,12 +15729,12 @@ class _UpdateSettingsPage extends StatelessWidget {
             );
             final desktopIntro = _SettingsCard(
               icon: Icons.info_outline,
-              title: 'Phiên bản hiện tại',
+              title: l10n.currentVersion,
               subtitle: '',
               trailing: FilledButton.tonalIcon(
                 onPressed: checking ? null : onCheckNow,
                 icon: _DirectorySyncIcon(checking: checking),
-                label: _ButtonLabel(checking ? 'Đang check' : 'Check'),
+                label: _ButtonLabel(checking ? l10n.checking : l10n.check),
               ),
               child: Row(
                 children: [
@@ -15563,7 +15766,7 @@ class _UpdateSettingsPage extends StatelessWidget {
             final mobileUpdateControls = Column(
               children: [
                 _UpdateSettingsSimpleRow(
-                  title: 'Nhắc khi có bản mới',
+                  title: l10n.autoCheckUpdates,
                   trailing: IgnorePointer(
                     child: Switch(
                       value: autoCheckUpdates,
@@ -15574,7 +15777,7 @@ class _UpdateSettingsPage extends StatelessWidget {
                 ),
                 const SizedBox(height: 8),
                 _UpdateSettingsSimpleRow(
-                  title: 'Trang giới thiệu',
+                  title: l10n.landingPage,
                   onTap: onOpenLandingPage,
                 ),
                 const SizedBox(height: 8),
@@ -15583,23 +15786,23 @@ class _UpdateSettingsPage extends StatelessWidget {
             );
             final desktopUpdateControls = _SettingsCard(
               icon: Icons.system_update_alt,
-              title: 'Kiểm tra cập nhật',
+              title: l10n.checkUpdates,
               subtitle: '',
               child: Column(
                 children: [
                   _SettingsSwitchRow(
                     icon: Icons.notifications_active_outlined,
-                    title: 'Nhắc khi có bản mới',
+                    title: l10n.autoCheckUpdates,
                     subtitle: autoCheckUpdates
-                        ? 'OpenCB tự kiểm tra khi mở app.'
-                        : 'Tắt tự động, vẫn có thể check thủ công.',
+                        ? l10n.autoCheckUpdatesEnabled
+                        : l10n.autoCheckUpdatesDisabled,
                     value: autoCheckUpdates,
                     onChanged: onToggleAutoCheck,
                   ),
                   const SizedBox(height: 8),
                   _SettingsNavigationRow(
                     icon: Icons.public,
-                    title: 'Trang giới thiệu',
+                    title: l10n.landingPage,
                     subtitle: _landingPageUrl,
                     onTap: onOpenLandingPage,
                   ),
@@ -15953,26 +16156,31 @@ class _ThemeSettingsPanel extends StatelessWidget {
   const _ThemeSettingsPanel({
     required this.themeMode,
     required this.selectedPreset,
+    required this.language,
     required this.onThemeModeChanged,
     required this.onThemePresetChanged,
+    required this.onLanguageChanged,
   });
 
   final ThemeMode themeMode;
   final M3ThemePreset selectedPreset;
+  final AppLanguage language;
   final ValueChanged<ThemeMode> onThemeModeChanged;
   final ValueChanged<M3ThemePreset> onThemePresetChanged;
+  final ValueChanged<AppLanguage> onLanguageChanged;
 
   @override
   Widget build(BuildContext context) {
+    final l10n = context.l10n;
     return _SettingsCard(
       icon: Icons.palette_outlined,
-      title: 'Giao diện',
+      title: l10n.appearance,
       subtitle: '',
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Text(
-            'Chế độ hiển thị',
+            l10n.displayMode,
             style: Theme.of(
               context,
             ).textTheme.labelLarge?.copyWith(fontWeight: FontWeight.w700),
@@ -15980,21 +16188,21 @@ class _ThemeSettingsPanel extends StatelessWidget {
           const SizedBox(height: 10),
           Center(
             child: SegmentedButton<ThemeMode>(
-              segments: const [
+              segments: [
                 ButtonSegment(
                   value: ThemeMode.light,
-                  icon: Icon(Icons.light_mode_outlined),
-                  label: _FittedOneLineLabel('Sáng'),
+                  icon: const Icon(Icons.light_mode_outlined),
+                  label: _FittedOneLineLabel(l10n.light),
                 ),
                 ButtonSegment(
                   value: ThemeMode.system,
-                  icon: Icon(Icons.brightness_auto_outlined),
-                  label: _FittedOneLineLabel('Hệ thống', minWidth: 54),
+                  icon: const Icon(Icons.brightness_auto_outlined),
+                  label: _FittedOneLineLabel(l10n.system, minWidth: 54),
                 ),
                 ButtonSegment(
                   value: ThemeMode.dark,
-                  icon: Icon(Icons.dark_mode_outlined),
-                  label: _FittedOneLineLabel('Tối'),
+                  icon: const Icon(Icons.dark_mode_outlined),
+                  label: _FittedOneLineLabel(l10n.dark),
                 ),
               ],
               selected: {themeMode},
@@ -16005,7 +16213,46 @@ class _ThemeSettingsPanel extends StatelessWidget {
           ),
           const SizedBox(height: 18),
           Text(
-            'Bảng màu Material You',
+            l10n.language,
+            style: Theme.of(
+              context,
+            ).textTheme.labelLarge?.copyWith(fontWeight: FontWeight.w700),
+          ),
+          const SizedBox(height: 10),
+          Center(
+            child: SegmentedButton<AppLanguage>(
+              segments: [
+                ButtonSegment(
+                  value: AppLanguage.system,
+                  icon: const Icon(Icons.language_outlined),
+                  label: _FittedOneLineLabel(l10n.languageSystem, minWidth: 54),
+                ),
+                ButtonSegment(
+                  value: AppLanguage.vi,
+                  icon: const Icon(Icons.translate_outlined),
+                  label: _FittedOneLineLabel(
+                    l10n.languageVietnamese,
+                    minWidth: 56,
+                  ),
+                ),
+                ButtonSegment(
+                  value: AppLanguage.en,
+                  icon: const Icon(Icons.translate),
+                  label: _FittedOneLineLabel(
+                    l10n.languageEnglish,
+                    minWidth: 56,
+                  ),
+                ),
+              ],
+              selected: {language},
+              onSelectionChanged: (selection) {
+                onLanguageChanged(selection.first);
+              },
+            ),
+          ),
+          const SizedBox(height: 18),
+          Text(
+            l10n.materialYouPalette,
             style: Theme.of(
               context,
             ).textTheme.labelLarge?.copyWith(fontWeight: FontWeight.w700),
@@ -16042,7 +16289,7 @@ class _ThemeSettingsPanel extends StatelessWidget {
                         label: SizedBox(
                           width: double.infinity,
                           child: Text(
-                            preset.name,
+                            _themePresetName(context.l10n, preset),
                             maxLines: 1,
                             overflow: TextOverflow.ellipsis,
                           ),
@@ -16137,6 +16384,7 @@ class _ClipboardSettingsPanelState extends State<_ClipboardSettingsPanel> {
   @override
   Widget build(BuildContext context) {
     final colorScheme = Theme.of(context).colorScheme;
+    final l10n = context.l10n;
     final retentionValue = _pendingRetentionLimit.toDouble();
     final isAndroid = Platform.isAndroid;
     return Column(
@@ -16146,10 +16394,10 @@ class _ClipboardSettingsPanelState extends State<_ClipboardSettingsPanel> {
             icon: widget.capturePaused
                 ? Icons.pause_circle_outline
                 : Icons.check_circle_outline,
-            title: 'Bắt clipboard',
+            title: l10n.captureClipboard,
             subtitle: widget.capturePaused
-                ? 'Tạm dừng toàn bộ việc lưu clipboard mới.'
-                : 'Theo dõi clipboard trong nền.',
+                ? l10n.capturePausedSubtitle
+                : l10n.captureEnabledSubtitle,
             value: !widget.capturePaused,
             onChanged: (_) => widget.onToggleCapture(),
           ),
@@ -16157,8 +16405,8 @@ class _ClipboardSettingsPanelState extends State<_ClipboardSettingsPanel> {
         ],
         _SettingsSwitchRow(
           icon: Icons.notes,
-          title: 'Văn bản và URL',
-          subtitle: 'Lưu text, tự nhận diện URL để mở nhanh.',
+          title: l10n.textAndUrl,
+          subtitle: l10n.textAndUrlSubtitle,
           value: widget.settings.captureText,
           onChanged: (value) => widget.onSettingsChanged(
             widget.settings.copyWith(captureText: value),
@@ -16168,8 +16416,8 @@ class _ClipboardSettingsPanelState extends State<_ClipboardSettingsPanel> {
         if (!isAndroid) ...[
           _SettingsSwitchRow(
             icon: Icons.image_outlined,
-            title: 'Hình ảnh',
-            subtitle: 'Lưu ảnh clipboard khi app nguồn cung cấp dữ liệu ảnh.',
+            title: l10n.images,
+            subtitle: l10n.imagesSubtitle,
             value: widget.settings.captureImages,
             onChanged: (value) => widget.onSettingsChanged(
               widget.settings.copyWith(captureImages: value),
@@ -16180,8 +16428,8 @@ class _ClipboardSettingsPanelState extends State<_ClipboardSettingsPanel> {
         if (!isAndroid) ...[
           _SettingsSwitchRow(
             icon: Icons.insert_drive_file_outlined,
-            title: 'Đường dẫn file/folder',
-            subtitle: 'Chỉ lưu đường dẫn, không lưu nội dung file thật.',
+            title: l10n.fileFolderPaths,
+            subtitle: l10n.fileFolderPathsSubtitle,
             value: widget.settings.captureFileReferences,
             onChanged: (value) => widget.onSettingsChanged(
               widget.settings.copyWith(captureFileReferences: value),
@@ -16190,9 +16438,8 @@ class _ClipboardSettingsPanelState extends State<_ClipboardSettingsPanel> {
           const SizedBox(height: 8),
           _SettingsSwitchRow(
             icon: Icons.keyboard_tab_outlined,
-            title: 'Tự dán từ chọn nhanh',
-            subtitle:
-                'Khi chọn item trong quick picker, tự paste vào ô đang nhập.',
+            title: l10n.autoPasteQuickPicker,
+            subtitle: l10n.autoPasteQuickPickerSubtitle,
             value: widget.settings.autoPasteFromQuickPicker,
             onChanged: (value) => widget.onSettingsChanged(
               widget.settings.copyWith(autoPasteFromQuickPicker: value),
@@ -16204,8 +16451,8 @@ class _ClipboardSettingsPanelState extends State<_ClipboardSettingsPanel> {
           if (widget.onToggleAndroidBatteryOptimizationBypass != null) ...[
             _SettingsSwitchRow(
               icon: Icons.battery_saver_outlined,
-              title: 'Bỏ qua tối ưu pin',
-              subtitle: 'Tùy chọn thêm nếu Sync LAN chưa ổn định.',
+              title: l10n.ignoreBatteryOptimization,
+              subtitle: l10n.ignoreBatteryOptimizationSubtitle,
               value: widget.androidIgnoringBatteryOptimizations,
               onChanged: widget.onToggleAndroidBatteryOptimizationBypass!,
             ),
@@ -16217,7 +16464,7 @@ class _ClipboardSettingsPanelState extends State<_ClipboardSettingsPanel> {
               child: OutlinedButton.icon(
                 onPressed: widget.onOpenAndroidNotificationSettings,
                 icon: const Icon(Icons.notifications_outlined),
-                label: const _OffsetButtonLabel('Cài đặt thông báo', y: 1),
+                label: _OffsetButtonLabel(l10n.notificationSettings, y: 1),
               ),
             ),
           ],
@@ -16226,8 +16473,8 @@ class _ClipboardSettingsPanelState extends State<_ClipboardSettingsPanel> {
         if (!isAndroid) ...[
           _SettingsSwitchRow(
             icon: Icons.login,
-            title: 'Tự mở cùng Windows',
-            subtitle: 'Đăng ký OpenCB trong Startup của tài khoản hiện tại.',
+            title: l10n.windowsAutoStart,
+            subtitle: l10n.windowsAutoStartSubtitle,
             value: widget.settings.windowsAutoStart,
             onChanged: (value) => widget.onSettingsChanged(
               widget.settings.copyWith(windowsAutoStart: value),
@@ -16236,10 +16483,10 @@ class _ClipboardSettingsPanelState extends State<_ClipboardSettingsPanel> {
           const SizedBox(height: 8),
           _SettingsSwitchRow(
             icon: Icons.keyboard_command_key,
-            title: 'Phím tắt mở chọn nhanh',
+            title: l10n.quickOpenHotkey,
             subtitle: widget.settings.quickOpenHotKey.enabled
                 ? widget.settings.quickOpenHotKey.label
-                : 'Đang tắt',
+                : l10n.disabled,
             value: widget.settings.quickOpenHotKey.enabled,
             onChanged: (value) => widget.onSettingsChanged(
               widget.settings.copyWith(
@@ -16255,17 +16502,17 @@ class _ClipboardSettingsPanelState extends State<_ClipboardSettingsPanel> {
             child: FilledButton.tonalIcon(
               onPressed: _recordHotKey,
               icon: const Icon(Icons.keyboard_alt_outlined),
-              label: const _ButtonLabel('Đổi phím tắt'),
+              label: _ButtonLabel(l10n.changeHotkey),
             ),
           ),
         ],
         const SizedBox(height: 16),
         _SettingsCard(
           icon: Icons.inventory_2_outlined,
-          title: 'Lưu trữ',
+          title: l10n.storage,
           subtitle: '',
           trailing: _MiniChip(
-            label: _formatClipboardCount(_pendingRetentionLimit),
+            label: _formatClipboardCount(_pendingRetentionLimit, l10n),
             labelYOffset: 1,
           ),
           child: _RetentionStandardSlider(
@@ -16288,8 +16535,8 @@ class _ClipboardSettingsPanelState extends State<_ClipboardSettingsPanel> {
           const SizedBox(height: 16),
           _SettingsCard(
             icon: Icons.visibility_off_outlined,
-            title: 'Ứng dụng loại trừ',
-            subtitle: 'Không lưu clipboard khi nguồn thuộc danh sách này.',
+            title: l10n.excludedApps,
+            subtitle: l10n.excludedAppsSubtitle,
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
@@ -16300,7 +16547,7 @@ class _ClipboardSettingsPanelState extends State<_ClipboardSettingsPanel> {
                         controller: _excludedSourceController,
                         decoration: _compactRoundedInputDecoration(
                           context,
-                          labelText: 'Tên ứng dụng nguồn',
+                          labelText: l10n.sourceAppName,
                           hintText: 'Chrome, 1Password, KeePass...',
                         ),
                         onSubmitted: _addSource,
@@ -16311,7 +16558,7 @@ class _ClipboardSettingsPanelState extends State<_ClipboardSettingsPanel> {
                       onPressed: () =>
                           _addSource(_excludedSourceController.text),
                       icon: const Icon(Icons.add),
-                      label: const _ButtonLabel('Thêm'),
+                      label: _ButtonLabel(l10n.add),
                     ),
                   ],
                 ),
@@ -16333,7 +16580,7 @@ class _ClipboardSettingsPanelState extends State<_ClipboardSettingsPanel> {
                 const SizedBox(height: 12),
                 if (widget.settings.excludedSources.isEmpty)
                   Text(
-                    'Chưa loại trừ ứng dụng nào.',
+                    l10n.noExcludedApps,
                     style: Theme.of(context).textTheme.bodySmall?.copyWith(
                       color: colorScheme.onSurfaceVariant,
                     ),
@@ -16396,7 +16643,7 @@ class _HotKeyRecorderDialogState extends State<_HotKeyRecorderDialog> {
     final keyPart = _hotKeyPartFromLogicalKey(event.logicalKey);
     if (keyPart == null) {
       if (!_isModifierLogicalKey(event.logicalKey)) {
-        setState(() => _errorText = 'Phím này chưa được hỗ trợ.');
+        setState(() => _errorText = context.l10n.unsupportedHotkey);
       }
       return KeyEventResult.handled;
     }
@@ -16408,10 +16655,7 @@ class _HotKeyRecorderDialogState extends State<_HotKeyRecorderDialog> {
         keyboard.isShiftPressed ||
         keyboard.isMetaPressed;
     if (!hasModifier) {
-      setState(
-        () =>
-            _errorText = 'Hãy dùng ít nhất một phím Ctrl, Alt, Shift hoặc Win.',
-      );
+      setState(() => _errorText = context.l10n.hotkeyNeedsModifier);
       return KeyEventResult.handled;
     }
 
@@ -16433,10 +16677,11 @@ class _HotKeyRecorderDialogState extends State<_HotKeyRecorderDialog> {
   @override
   Widget build(BuildContext context) {
     final colorScheme = Theme.of(context).colorScheme;
+    final l10n = context.l10n;
     final hotKey = _recordedHotKey ?? widget.initialHotKey;
     return AlertDialog(
       icon: const Icon(Icons.keyboard_alt_outlined),
-      title: const Text('Đổi phím tắt'),
+      title: Text(l10n.changeHotkey),
       content: Focus(
         focusNode: _focusNode,
         onKeyEvent: _handleKey,
@@ -16447,7 +16692,7 @@ class _HotKeyRecorderDialogState extends State<_HotKeyRecorderDialog> {
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               Text(
-                'Nhấn tổ hợp phím muốn dùng để mở chọn nhanh.',
+                l10n.pressHotkeyInstruction,
                 style: Theme.of(context).textTheme.bodyMedium,
               ),
               const SizedBox(height: 14),
@@ -16489,13 +16734,13 @@ class _HotKeyRecorderDialogState extends State<_HotKeyRecorderDialog> {
       actions: [
         TextButton(
           onPressed: () => Navigator.of(context).pop(),
-          child: const _ButtonLabel('Hủy'),
+          child: _ButtonLabel(l10n.cancel),
         ),
         FilledButton(
           onPressed: _recordedHotKey == null
               ? null
               : () => Navigator.of(context).pop(_recordedHotKey),
-          child: const _ButtonLabel('Lưu'),
+          child: _ButtonLabel(l10n.save),
         ),
       ],
     );
@@ -16652,6 +16897,7 @@ class _RetentionStandardSlider extends StatelessWidget {
   Widget build(BuildContext context) {
     final colorScheme = Theme.of(context).colorScheme;
     final textTheme = Theme.of(context).textTheme;
+    final l10n = context.l10n;
     final roundedValue = _normalizeRetentionLimit(value.round());
     final labelStyle = textTheme.labelMedium?.copyWith(
       color: colorScheme.onSurfaceVariant,
@@ -16659,23 +16905,25 @@ class _RetentionStandardSlider extends StatelessWidget {
     );
 
     return Semantics(
-      label: 'Giới hạn lưu clipboard',
-      value: _formatClipboardCount(roundedValue),
+      label: l10n.retentionLimitClipboard,
+      value: _formatClipboardCount(roundedValue, l10n),
       increasedValue: _formatClipboardCount(
         _normalizeRetentionLimit(roundedValue + 200),
+        l10n,
       ),
       decreasedValue: _formatClipboardCount(
         _normalizeRetentionLimit(roundedValue - 200),
+        l10n,
       ),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           Row(
             children: [
-              Text('Giới hạn lưu', style: labelStyle),
+              Text(l10n.retentionLimit, style: labelStyle),
               const Spacer(),
               Text(
-                _formatClipboardCount(roundedValue),
+                _formatClipboardCount(roundedValue, l10n),
                 style: textTheme.labelLarge?.copyWith(
                   color: colorScheme.primary,
                   fontWeight: FontWeight.w800,
@@ -16702,9 +16950,10 @@ class _RetentionStandardSlider extends StatelessWidget {
               min: _min,
               max: _max,
               divisions: _divisions,
-              label: _formatClipboardCount(roundedValue),
+              label: _formatClipboardCount(roundedValue, l10n),
               semanticFormatterCallback: (value) => _formatClipboardCount(
                 _normalizeRetentionLimit(value.round()),
+                l10n,
               ),
               onChanged: onChanged,
               onChangeEnd: onChangeEnd,
@@ -16714,9 +16963,15 @@ class _RetentionStandardSlider extends StatelessWidget {
             padding: const EdgeInsets.symmetric(horizontal: 4),
             child: Row(
               children: [
-                Text(_formatClipboardCount(_min.toInt()), style: labelStyle),
+                Text(
+                  _formatClipboardCount(_min.toInt(), l10n),
+                  style: labelStyle,
+                ),
                 const Spacer(),
-                Text(_formatClipboardCount(_max.toInt()), style: labelStyle),
+                Text(
+                  _formatClipboardCount(_max.toInt(), l10n),
+                  style: labelStyle,
+                ),
               ],
             ),
           ),
@@ -17277,6 +17532,7 @@ class _LocalDeviceRow extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final colorScheme = Theme.of(context).colorScheme;
+    final l10n = context.l10n;
     final hasError = syncError != null;
     Widget localDeviceBadge({
       required String label,
@@ -17301,7 +17557,7 @@ class _LocalDeviceRow extends StatelessWidget {
 
     return _SettingsCard(
       icon: hasError ? Icons.error_outline : Icons.computer,
-      title: 'Thiết bị này',
+      title: l10n.thisDevice,
       subtitle: '',
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -17339,7 +17595,7 @@ class _LocalDeviceRow extends StatelessWidget {
                       ),
                     ),
                     Tooltip(
-                      message: 'Đổi tên thiết bị này',
+                      message: l10n.renameThisDevice,
                       child: IconButton(
                         onPressed: onRename,
                         icon: const Icon(Icons.edit_outlined, size: 18),
@@ -17403,6 +17659,7 @@ class _PairQrCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final colorScheme = Theme.of(context).colorScheme;
+    final l10n = context.l10n;
     return Card.filled(
       margin: EdgeInsets.zero,
       color: colorScheme.surfaceContainerLow,
@@ -17417,7 +17674,7 @@ class _PairQrCard extends StatelessWidget {
                 const SizedBox(width: 10),
                 Expanded(
                   child: Text(
-                    'QR pairing',
+                    l10n.qrPairing,
                     style: Theme.of(context).textTheme.titleMedium?.copyWith(
                       fontWeight: FontWeight.w800,
                     ),
@@ -17426,8 +17683,8 @@ class _PairQrCard extends StatelessWidget {
                 _MotionFeedbackButton(
                   onPressed: onCopyPairPayload,
                   icon: Icons.copy_all_outlined,
-                  label: 'Copy payload',
-                  successLabel: 'Copied',
+                  label: l10n.copyPayload,
+                  successLabel: l10n.copied,
                   variant: _MotionFeedbackButtonVariant.filledTonal,
                   labelYOffset: 1,
                 ),
@@ -17490,10 +17747,11 @@ class _DiscoveredDevicesCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final colorScheme = Theme.of(context).colorScheme;
+    final l10n = context.l10n;
     if (devices.isEmpty) {
       return _SettingsCard(
         icon: Icons.radar_outlined,
-        title: 'Thiết bị đang thấy',
+        title: l10n.visibleDevices,
         subtitle: '',
         child: Row(
           children: [
@@ -17501,7 +17759,7 @@ class _DiscoveredDevicesCard extends StatelessWidget {
             const SizedBox(width: 12),
             Expanded(
               child: Text(
-                'Chưa thấy thiết bị OpenCB khác. Hãy mở app trên thiết bị cùng Wi-Fi/VPN.',
+                l10n.noVisibleDevices,
                 style: Theme.of(context).textTheme.bodyMedium?.copyWith(
                   color: colorScheme.onSurfaceVariant,
                 ),
@@ -17514,9 +17772,12 @@ class _DiscoveredDevicesCard extends StatelessWidget {
 
     return _SettingsCard(
       icon: Icons.radar_outlined,
-      title: 'Thiết bị đang thấy',
+      title: l10n.visibleDevices,
       subtitle: '',
-      trailing: _MiniChip(label: '${devices.length} tìm thấy', labelYOffset: 0),
+      trailing: _MiniChip(
+        label: '${devices.length} ${l10n.found}',
+        labelYOffset: 0,
+      ),
       child: Column(
         children: [
           for (final device in devices) ...[
@@ -17538,6 +17799,7 @@ class _DiscoveredDeviceRow extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final colorScheme = Theme.of(context).colorScheme;
+    final l10n = context.l10n;
     return Material(
       color: colorScheme.surfaceContainer,
       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
@@ -17565,7 +17827,7 @@ class _DiscoveredDeviceRow extends StatelessWidget {
                       ),
                       const SizedBox(height: 2),
                       Text(
-                        '${device.endpoint} - thấy ${_relativeTime(device.lastSeenAt)}',
+                        '${device.endpoint} - ${l10n.seen} ${_relativeTime(device.lastSeenAt, l10n)}',
                         maxLines: compact ? 2 : 1,
                         overflow: TextOverflow.ellipsis,
                         style: Theme.of(context).textTheme.bodySmall?.copyWith(
@@ -17580,7 +17842,7 @@ class _DiscoveredDeviceRow extends StatelessWidget {
             final addButton = FilledButton.tonalIcon(
               onPressed: onAdd,
               icon: const Icon(Icons.add_link),
-              label: const _OffsetButtonLabel('Kết nối', y: 1),
+              label: _OffsetButtonLabel(l10n.connect, y: 1),
             );
             if (compact) {
               return Column(
@@ -17626,6 +17888,7 @@ class _DeviceRow extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final colorScheme = Theme.of(context).colorScheme;
+    final l10n = context.l10n;
     final hasError = peer.lastError != null;
     final peerErrorText = peer.lastError == null
         ? null
@@ -17662,22 +17925,22 @@ class _DeviceRow extends StatelessWidget {
 
     final actionButtons = [
       deviceActionButton(
-        tooltip: 'Test kết nối',
+        tooltip: l10n.testConnection,
         onPressed: onTest,
         icon: Icons.network_ping,
       ),
       deviceActionButton(
-        tooltip: 'Đổi tên thiết bị',
+        tooltip: l10n.renameDevice,
         onPressed: onRename,
         icon: Icons.edit_outlined,
       ),
       deviceActionButton(
-        tooltip: 'Sync thiết bị',
+        tooltip: l10n.syncDevice,
         onPressed: onSync,
         icon: Icons.sync,
       ),
       deviceActionButton(
-        tooltip: 'Xóa thiết bị',
+        tooltip: l10n.removeDevice,
         onPressed: onRemove,
         icon: Icons.link_off,
         foregroundColor: colorScheme.error,
@@ -17694,12 +17957,12 @@ class _DeviceRow extends StatelessWidget {
         : colorScheme.error;
     final statusBadge = _M3Badge(
       label: hasError
-          ? 'Lỗi'
+          ? l10n.error
           : online
-          ? 'Online'
+          ? l10n.online
           : recentlySeen
-          ? 'Vừa thấy'
-          : 'Offline',
+          ? l10n.recentlySeen
+          : l10n.offline,
       tone: _M3BadgeTone.surface,
       horizontalPadding: 8,
       tightText: true,
@@ -17791,7 +18054,7 @@ class _DeviceRow extends StatelessWidget {
               ),
               const SizedBox(height: 2),
               Text(
-                peerErrorText ?? peer.lastSynced,
+                peerErrorText ?? _lastSyncedLabel(peer, l10n),
                 maxLines: compact ? 2 : 1,
                 overflow: TextOverflow.ellipsis,
                 style: Theme.of(context).textTheme.bodySmall?.copyWith(
@@ -18174,10 +18437,38 @@ String _formatBytes(int bytes) {
   return '${value.toStringAsFixed(decimals)} ${units[unitIndex]}';
 }
 
-String _formatTransferSpeed(int bytesPerSecond) {
-  if (bytesPerSecond <= 0) return 'Đang đo';
+String _formatTransferSpeed(int bytesPerSecond, [AppLocalizations? l10n]) {
+  if (bytesPerSecond <= 0) return l10n?.measuring ?? 'Đang đo';
   return '${_formatBytes(bytesPerSecond)}/s';
 }
+
+String _localizedCount(
+  AppLocalizations l10n,
+  int count,
+  String unit, {
+  String? pluralUnit,
+}) {
+  final effectiveUnit = l10n.localeName.startsWith('en') && count != 1
+      ? (pluralUnit ?? '${unit}s')
+      : unit;
+  return '$count $effectiveUnit';
+}
+
+String _localizedFileCount(AppLocalizations l10n, int count) =>
+    _localizedCount(l10n, count, l10n.fileUnit);
+
+String _localizedMoreFileCount(AppLocalizations l10n, int count) {
+  if (l10n.localeName.startsWith('en')) {
+    return '+$count ${l10n.moreFiles}';
+  }
+  return '+$count ${l10n.fileUnit} ${l10n.moreFiles}';
+}
+
+String _localizedDeviceCount(AppLocalizations l10n, int count) =>
+    _localizedCount(l10n, count, l10n.deviceUnit);
+
+String _localizedItemCount(AppLocalizations l10n, int count) =>
+    _localizedCount(l10n, count, l10n.itemUnit);
 
 String _generateTransferId() {
   final now = DateTime.now().microsecondsSinceEpoch;
@@ -18185,15 +18476,18 @@ String _generateTransferId() {
   return 'transfer-$now-$suffix';
 }
 
-String _fileTransferStatusLabel(FileTransferStatus status) {
+String _fileTransferStatusLabel(
+  AppLocalizations l10n,
+  FileTransferStatus status,
+) {
   return switch (status) {
-    FileTransferStatus.waiting => 'Đang chờ xác nhận',
-    FileTransferStatus.sending => 'Đang gửi',
-    FileTransferStatus.receiving => 'Đang nhận',
-    FileTransferStatus.completed => 'Hoàn tất',
-    FileTransferStatus.rejected => 'Từ chối',
-    FileTransferStatus.failed => 'Lỗi',
-    FileTransferStatus.canceled => 'Đã hủy',
+    FileTransferStatus.waiting => l10n.waitingForConfirm,
+    FileTransferStatus.sending => l10n.sending,
+    FileTransferStatus.receiving => l10n.receiving,
+    FileTransferStatus.completed => l10n.completed,
+    FileTransferStatus.rejected => l10n.rejected,
+    FileTransferStatus.failed => l10n.error,
+    FileTransferStatus.canceled => l10n.canceled,
   };
 }
 
@@ -18243,6 +18537,20 @@ M3ThemePreset _presetById(String? id) {
   );
 }
 
+String _themePresetName(AppLocalizations l10n, M3ThemePreset preset) {
+  return switch (preset.id) {
+    'opencb_teal' => l10n.themeOpenCbTeal,
+    'forest_green' => l10n.themeForestGreen,
+    'baseline_purple' => l10n.themeBaselinePurple,
+    'ink_blue' => l10n.themeSerenity,
+    'soft_pink' => l10n.themeRoseQuartz,
+    'sunset_coral' => l10n.themeSunsetCoral,
+    'mono_black_white' => l10n.themeMonoBlackWhite,
+    'blue_grey' => l10n.themeBlueGrey,
+    _ => preset.name,
+  };
+}
+
 ThemeMode _themeModeFromName(String? name) {
   return ThemeMode.values.firstWhere(
     (mode) => mode.name == name,
@@ -18255,7 +18563,7 @@ int _normalizeRetentionLimit(int value) {
   return ((clamped / 200).round() * 200).clamp(200, 10000);
 }
 
-String _formatClipboardCount(int value) {
+String _formatClipboardCount(int value, [AppLocalizations? l10n]) {
   final digits = value.toString();
   final buffer = StringBuffer();
   for (var index = 0; index < digits.length; index += 1) {
@@ -18265,7 +18573,15 @@ String _formatClipboardCount(int value) {
       buffer.write('.');
     }
   }
-  return '$buffer mục';
+  final unit = l10n == null ? 'mục' : _localizedItemUnit(l10n, value);
+  return '$buffer $unit';
+}
+
+String _localizedItemUnit(AppLocalizations l10n, int count) {
+  if (l10n.localeName.startsWith('en') && count != 1) {
+    return '${l10n.itemUnit}s';
+  }
+  return l10n.itemUnit;
 }
 
 bool _isRemoteVersionNewer(String remoteTag, String currentVersion) {
@@ -18400,45 +18716,31 @@ Color _readableTagAccent(Color color) {
   return color;
 }
 
-String _kindLabel(ClipboardKind kind) {
+String _kindLabel(AppLocalizations l10n, ClipboardKind kind) {
   return switch (kind) {
-    ClipboardKind.text => 'Văn bản',
-    ClipboardKind.code => 'Code',
-    ClipboardKind.url => 'URL',
-    ClipboardKind.image => 'Hình ảnh',
-    ClipboardKind.fileReference => 'Path',
+    ClipboardKind.text => l10n.clipboardText,
+    ClipboardKind.code => l10n.clipboardCode,
+    ClipboardKind.url => l10n.clipboardUrl,
+    ClipboardKind.image => l10n.clipboardImage,
+    ClipboardKind.fileReference => l10n.clipboardPath,
   };
 }
 
-String _shortKindLabel(ClipboardKind kind) {
+String _shortKindLabel(AppLocalizations l10n, ClipboardKind kind) {
   return switch (kind) {
-    ClipboardKind.text => 'Text',
-    ClipboardKind.code => 'Code',
-    ClipboardKind.url => 'URL',
-    ClipboardKind.image => 'Image',
-    ClipboardKind.fileReference => 'Path',
+    ClipboardKind.text => l10n.clipboardText,
+    ClipboardKind.code => l10n.clipboardCode,
+    ClipboardKind.url => l10n.clipboardUrl,
+    ClipboardKind.image => l10n.clipboardImage,
+    ClipboardKind.fileReference => l10n.clipboardPath,
   };
 }
 
-String _quickPickerKindLabel(ClipboardKind kind) {
-  return switch (kind) {
-    ClipboardKind.text => 'Text',
-    ClipboardKind.code => 'Code',
-    ClipboardKind.url => 'URL',
-    ClipboardKind.image => 'Image',
-    ClipboardKind.fileReference => 'Path',
-  };
-}
+String _quickPickerKindLabel(AppLocalizations l10n, ClipboardKind kind) =>
+    _shortKindLabel(l10n, kind);
 
-String _quickPickerMetaKindLabel(ClipboardKind kind) {
-  return switch (kind) {
-    ClipboardKind.text => 'Văn bản',
-    ClipboardKind.code => 'Code',
-    ClipboardKind.url => 'URL',
-    ClipboardKind.image => 'Hình ảnh',
-    ClipboardKind.fileReference => 'Path',
-  };
-}
+String _quickPickerMetaKindLabel(AppLocalizations l10n, ClipboardKind kind) =>
+    _kindLabel(l10n, kind);
 
 String _displaySourceLabel(String source) {
   final trimmed = source.trim();
@@ -18569,13 +18871,26 @@ String? _normalizedUrl(String value) {
   return uri.toString();
 }
 
-String _relativeTime(DateTime value) {
+String _relativeTime(DateTime value, [AppLocalizations? l10n]) {
   final diff = DateTime.now().difference(value);
-  if (diff.inSeconds < 60) return 'Vừa xong';
-  if (diff.inMinutes < 60) return '${diff.inMinutes} phút trước';
-  if (diff.inHours < 24) return '${diff.inHours} giờ trước';
-  if (diff.inDays < 7) return '${diff.inDays} ngày trước';
+  if (l10n != null) {
+    if (diff.inSeconds < 60) return l10n.justNow;
+    if (diff.inMinutes < 60) return '${diff.inMinutes} ${l10n.minuteAgo}';
+    if (diff.inHours < 24) return '${diff.inHours} ${l10n.hourAgo}';
+    if (diff.inDays < 7) return '${diff.inDays} ${l10n.dayAgo}';
+  } else {
+    if (diff.inSeconds < 60) return 'Vừa xong';
+    if (diff.inMinutes < 60) return '${diff.inMinutes} phút trước';
+    if (diff.inHours < 24) return '${diff.inHours} giờ trước';
+    if (diff.inDays < 7) return '${diff.inDays} ngày trước';
+  }
   return '${value.year}-${value.month.toString().padLeft(2, '0')}-${value.day.toString().padLeft(2, '0')}';
+}
+
+String _lastSyncedLabel(SyncPeer peer, AppLocalizations l10n) {
+  final lastSyncedAt = peer.lastSyncedAt;
+  if (lastSyncedAt == null) return l10n.neverSynced;
+  return '${l10n.lastSyncPrefix} ${_relativeTime(lastSyncedAt, l10n)}';
 }
 
 String _copyTimeLabel(DateTime value) {

@@ -15,7 +15,7 @@
         android:ellipsize="end"
         android:fontFamily="sans"
         android:maxLines="1"
-        android:text="OpenCB đang chạy nền"
+        android:text="@string/notification_background_title"
         android:textColor="#DCE5E1"
         android:textSize="14sp"
         android:textStyle="bold" />
@@ -28,7 +28,7 @@
         android:minWidth="100dp"
         android:paddingStart="8dp"
         android:paddingEnd="8dp"
-        android:text="Gửi clipboard"
+        android:text="@string/notification_action_send_clipboard"
         android:textColor="#DCE5E1"
         android:textSize="14sp"
         android:textStyle="bold" />

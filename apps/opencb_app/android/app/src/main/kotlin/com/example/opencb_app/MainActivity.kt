@@ -7,6 +7,7 @@ import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.ContentValues
 import android.content.Context
+import android.content.IntentFilter
 import android.content.res.Configuration
 import android.graphics.drawable.ColorDrawable
 import android.graphics.Color
@@ -32,7 +33,6 @@ import android.provider.MediaStore
 import android.provider.Settings
 import android.util.Log
 import android.view.View
-import android.widget.RemoteViews
 import android.widget.Toast
 import io.flutter.app.FlutterApplication
 import io.flutter.embedding.android.FlutterActivity
@@ -292,6 +292,7 @@ class OpenCbBackgroundService : Service() {
         private const val notificationId = 4818
         private const val clipboardPromptNotificationId = 4821
         private const val channelId = "opencb_background_v5"
+        private var connectedDeviceNames: List<String> = emptyList()
         var isRunning = false
             private set
 
@@ -320,13 +321,36 @@ class OpenCbBackgroundService : Service() {
                 false
             }
         }
+
+        fun updateConnectedDevices(context: Context, names: List<String>) {
+            connectedDeviceNames = names
+                .map { it.trim() }
+                .filter { it.isNotEmpty() }
+                .distinct()
+            if (isRunning) {
+                start(context)
+            }
+        }
+
+        private fun connectedDeviceNamesSnapshot(): List<String> {
+            return connectedDeviceNames.toList()
+        }
     }
 
     private var multicastLock: WifiManager.MulticastLock? = null
     private var clipboardManager: ClipboardManager? = null
     private var lastNativeClipboardText: String? = null
+    private var screenStateReceiverRegistered = false
     private val clipboardListener = ClipboardManager.OnPrimaryClipChangedListener {
         emitPrimaryClipboardText()
+    }
+    private val screenStateReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            when (intent?.action) {
+                Intent.ACTION_SCREEN_ON,
+                Intent.ACTION_USER_PRESENT -> refreshForegroundNotification()
+            }
+        }
     }
 
     override fun onCreate() {
@@ -335,12 +359,12 @@ class OpenCbBackgroundService : Service() {
         ensureChannel()
         startForeground(notificationId, buildNotification())
         acquireMulticastLock()
+        startScreenStateReceiver()
         startClipboardListener()
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        ensureChannel()
-        startForeground(notificationId, buildNotification())
+        refreshForegroundNotification()
         return START_STICKY
     }
 
@@ -349,6 +373,7 @@ class OpenCbBackgroundService : Service() {
     override fun onDestroy() {
         isRunning = false
         stopClipboardListener()
+        stopScreenStateReceiver()
         releaseMulticastLock()
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
             stopForeground(STOP_FOREGROUND_REMOVE)
@@ -380,6 +405,49 @@ class OpenCbBackgroundService : Service() {
             Log.w(openCbLogTag, "Unable to release multicast lock.", error)
         } finally {
             multicastLock = null
+        }
+    }
+
+    private fun startScreenStateReceiver() {
+        if (screenStateReceiverRegistered) return
+        val filter = IntentFilter().apply {
+            addAction(Intent.ACTION_SCREEN_ON)
+            addAction(Intent.ACTION_USER_PRESENT)
+        }
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                registerReceiver(
+                    screenStateReceiver,
+                    filter,
+                    Context.RECEIVER_NOT_EXPORTED,
+                )
+            } else {
+                @Suppress("DEPRECATION")
+                registerReceiver(screenStateReceiver, filter)
+            }
+            screenStateReceiverRegistered = true
+        } catch (error: Exception) {
+            Log.w(openCbLogTag, "Unable to register screen state receiver.", error)
+        }
+    }
+
+    private fun stopScreenStateReceiver() {
+        if (!screenStateReceiverRegistered) return
+        try {
+            unregisterReceiver(screenStateReceiver)
+        } catch (error: Exception) {
+            Log.w(openCbLogTag, "Unable to unregister screen state receiver.", error)
+        } finally {
+            screenStateReceiverRegistered = false
+        }
+    }
+
+    private fun refreshForegroundNotification() {
+        try {
+            ensureChannel()
+            startForeground(notificationId, buildNotification())
+        } catch (error: Exception) {
+            Log.w(openCbLogTag, "Unable to refresh foreground notification.", error)
         }
     }
 
@@ -450,13 +518,13 @@ class OpenCbBackgroundService : Service() {
         val notification = builder
             .setSmallIcon(R.drawable.ic_stat_opencb)
             .setLargeIcon(appIconBitmap(36))
-            .setContentTitle("Clipboard mới")
+            .setContentTitle(getString(R.string.notification_clipboard_new))
             .setContentText(preview)
             .setContentIntent(contentIntent)
             .addAction(
                 android.app.Notification.Action.Builder(
                     applicationInfo.icon,
-                    "Gửi clipboard",
+                    getString(R.string.notification_action_send_clipboard),
                     backgroundActionIntent("sendClipboard"),
                 ).build()
             )
@@ -478,10 +546,10 @@ class OpenCbBackgroundService : Service() {
         cleanupLegacyBackgroundChannels(manager)
         val channel = NotificationChannel(
             channelId,
-            "OpenCB chạy nền",
+            getString(R.string.notification_background_channel_name),
             NotificationManager.IMPORTANCE_MIN,
         ).apply {
-            description = "Giữ OpenCB online và cung cấp nút gửi clipboard"
+            description = getString(R.string.notification_background_channel_description)
             setShowBadge(false)
             enableVibration(false)
             setSound(null, null)
@@ -505,6 +573,15 @@ class OpenCbBackgroundService : Service() {
     }
 
     private fun buildNotification(): android.app.Notification {
+        val connectedNames = connectedDeviceNamesSnapshot()
+        val statusText = if (connectedNames.isEmpty()) {
+            getString(R.string.notification_background_no_devices)
+        } else {
+            getString(
+                R.string.notification_background_connected,
+                connectedNames.joinToString(", "),
+            )
+        }
         val launchIntent = packageManager.getLaunchIntentForPackage(packageName)
             ?: Intent(this, MainActivity::class.java)
         launchIntent.flags = Intent.FLAG_ACTIVITY_SINGLE_TOP or Intent.FLAG_ACTIVITY_CLEAR_TOP
@@ -520,25 +597,10 @@ class OpenCbBackgroundService : Service() {
             @Suppress("DEPRECATION")
             android.app.Notification.Builder(this)
         }
-        val compactView = RemoteViews(packageName, R.layout.opencb_background_notification).apply {
-            setTextViewText(R.id.opencb_background_title, "OpenCB")
-            setTextViewText(R.id.opencb_background_action, "Gửi clipboard")
-            setOnClickPendingIntent(
-                R.id.opencb_background_action,
-                backgroundActionIntent("sendClipboard"),
-            )
-        }
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
-            builder
-                .setCustomContentView(compactView)
-                .setCustomBigContentView(compactView)
-                .setCustomHeadsUpContentView(compactView)
-                .setStyle(android.app.Notification.DecoratedCustomViewStyle())
-        }
-        val notification = builder
+        builder
             .setSmallIcon(R.drawable.ic_stat_opencb)
-            .setContentTitle("OpenCB đang chạy nền")
-            .setContentText("Sync LAN sẵn sàng")
+            .setContentText(statusText)
+            .setStyle(android.app.Notification.BigTextStyle().bigText(statusText))
             .setContentIntent(pendingIntent)
             .setCategory(android.app.Notification.CATEGORY_SERVICE)
             .setLocalOnly(true)
@@ -550,7 +612,25 @@ class OpenCbBackgroundService : Service() {
             .setVibrate(null)
             .setPriority(android.app.Notification.PRIORITY_MIN)
             .setVisibility(android.app.Notification.VISIBILITY_SECRET)
-            .build()
+
+        if (connectedNames.isNotEmpty()) {
+            builder.addAction(
+                android.app.Notification.Action.Builder(
+                    R.drawable.ic_stat_opencb,
+                    getString(R.string.notification_action_send_file),
+                    backgroundActionIntent("pickFiles"),
+                ).build()
+            )
+            .addAction(
+                android.app.Notification.Action.Builder(
+                    R.drawable.ic_stat_opencb,
+                    getString(R.string.notification_action_send_clipboard),
+                    backgroundActionIntent("sendClipboard"),
+                ).build()
+            )
+        }
+
+        val notification = builder.build()
         notification.flags =
             notification.flags or
                 android.app.Notification.FLAG_ONGOING_EVENT or
@@ -559,19 +639,25 @@ class OpenCbBackgroundService : Service() {
     }
 
     private fun backgroundActionIntent(action: String): PendingIntent {
-        val intent = if (action == "sendClipboard") {
-            Intent(this, OpenCbClipboardSendActivity::class.java).apply {
+        val intent = when (action) {
+            "sendClipboard" -> Intent(this, OpenCbClipboardSendActivity::class.java).apply {
                 flags = Intent.FLAG_ACTIVITY_NEW_TASK or Intent.FLAG_ACTIVITY_NO_ANIMATION
                 putExtra("opencb_background_action", action)
             }
-        } else {
-            Intent(this, OpenCbNotificationActionReceiver::class.java).apply {
+            "pickFiles" -> Intent(this, MainActivity::class.java).apply {
+                flags =
+                    Intent.FLAG_ACTIVITY_NEW_TASK or
+                        Intent.FLAG_ACTIVITY_SINGLE_TOP or
+                        Intent.FLAG_ACTIVITY_CLEAR_TOP
+                putExtra("opencb_background_action", action)
+            }
+            else -> Intent(this, OpenCbNotificationActionReceiver::class.java).apply {
                 putExtra("opencb_background_action", action)
             }
         }
         val requestCode = 481800 + action.hashCode().let { if (it < 0) -it else it } % 10000
         val flags = PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
-        return if (action == "sendClipboard") {
+        return if (action == "sendClipboard" || action == "pickFiles") {
             PendingIntent.getActivity(this, requestCode, intent, flags)
         } else {
             PendingIntent.getBroadcast(this, requestCode, intent, flags)
@@ -692,6 +778,13 @@ class MainActivity : FlutterActivity() {
                     "setClipboardSendPromptEnabled" -> {
                         OpenCbNotificationBridge.clipboardSendPromptEnabled =
                             call.argument<Boolean>("enabled") ?: false
+                        result.success(true)
+                    }
+                    "setBackgroundNotificationDevices" -> {
+                        val rawNames = call.argument<List<*>>("names")
+                            ?.mapNotNull { it as? String }
+                            ?: emptyList()
+                        OpenCbBackgroundService.updateConnectedDevices(this, rawNames)
                         result.success(true)
                     }
                     "showOpenCbNotification" -> {
@@ -816,6 +909,7 @@ class MainActivity : FlutterActivity() {
                     else -> result.notImplemented()
                 }
             }
+        handleNotificationAction(intent)
         handleSharedContent(intent, notifyFlutter = false)
     }
 
@@ -1140,6 +1234,11 @@ class MainActivity : FlutterActivity() {
     }
 
     private fun handleNotificationAction(intent: Intent?) {
+        if (intent?.hasExtra("opencb_background_action") == true) {
+            OpenCbNotificationBridge.sendBackgroundAction(this, intent)
+            intent.removeExtra("opencb_background_action")
+            return
+        }
         OpenCbNotificationBridge.sendFileOfferAction(this, intent)
     }
 

@@ -16,9 +16,9 @@ void main() {
     await tester.pump();
 
     expect(find.text('OpenCB'), findsOneWidget);
-    expect(find.text('Lịch sử clipboard'), findsOneWidget);
+    expect(find.text('Lịch sử'), findsWidgets);
     expect(find.byTooltip('Mở chọn nhanh'), findsNothing);
-    expect(find.byTooltip('Xóa lịch sử chưa ghim'), findsOneWidget);
+    expect(find.byTooltip('Dọn clipboard'), findsWidgets);
 
     await tester.tap(find.text('Thiết bị'));
     await tester.pumpAndSettle();
@@ -36,6 +36,7 @@ void main() {
     await tester.tap(find.text('Cài đặt'));
     await tester.pumpAndSettle();
     expect(find.text('Cài đặt'), findsWidgets);
+    expect(find.text('Ngôn ngữ'), findsOneWidget);
     expect(find.text('Bắt clipboard'), findsOneWidget);
     await tester.drag(find.byType(ListView).last, const Offset(0, -520));
     await tester.pumpAndSettle();
