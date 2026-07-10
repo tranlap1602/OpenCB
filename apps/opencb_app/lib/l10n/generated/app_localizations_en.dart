@@ -902,4 +902,86 @@ class AppLocalizationsEn extends AppLocalizations {
 
   @override
   String get bulkTaggedSuffix => '.';
+
+  @override
+  String get lanDiagnostics => 'LAN diagnostics';
+
+  @override
+  String get lanDiagnosticsSubtitle =>
+      'Discovery, server, and device connection status';
+
+  @override
+  String get refreshDiagnostics => 'Refresh';
+
+  @override
+  String get exportLog => 'Export log';
+
+  @override
+  String get localServices => 'Local services';
+
+  @override
+  String get syncServer => 'Sync server';
+
+  @override
+  String get fileServer => 'File server';
+
+  @override
+  String get lanDiscovery => 'LAN discovery';
+
+  @override
+  String get running => 'Running';
+
+  @override
+  String get stopped => 'Stopped';
+
+  @override
+  String get foreground => 'Foreground';
+
+  @override
+  String get background => 'Background';
+
+  @override
+  String get screenAwake => 'Screen awake';
+
+  @override
+  String get screenSleeping => 'Screen off';
+
+  @override
+  String get beaconInterval => 'Beacon interval';
+
+  @override
+  String get connectionDetails => 'Connection details';
+
+  @override
+  String get recentEvents => 'Recent events';
+
+  @override
+  String get noDiagnosticEvents => 'No diagnostic events yet.';
+
+  @override
+  String get beaconReceived => 'Receiving beacons';
+
+  @override
+  String get remoteSleeping => 'Device reported sleeping';
+
+  @override
+  String get beaconExpired => 'Beacon expired';
+
+  @override
+  String get beaconNeverSeen => 'No beacon received';
+
+  @override
+  String get lastPing => 'Last ping';
+
+  @override
+  String get notMeasured => 'Not measured';
+
+  @override
+  String get exportCrashReport => 'Export crash report';
+
+  @override
+  String get crashReportExportedPrefix => 'Crash report exported to';
+
+  @override
+  String get cannotExportCrashReport => 'Could not export the crash report.';
 }

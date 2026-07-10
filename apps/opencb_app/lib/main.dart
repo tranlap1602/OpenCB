@@ -18,7 +18,7 @@ import 'package:path_provider/path_provider.dart';
 import 'package:qr_flutter/qr_flutter.dart';
 
 const MethodChannel _rootPlatformChannel = MethodChannel('opencb/platform');
-const String _appVersion = '1.6.0';
+const String _appVersion = '1.6.1';
 const String _appVersionLabel = 'v$_appVersion';
 const String _landingPageUrl = 'https://tranlap1602.github.io/OpenCB/';
 const String _githubRepoUrl = 'https://github.com/tranlap1602/OpenCB';
@@ -26,11 +26,97 @@ const String _latestReleaseApiUrl =
     'https://api.github.com/repos/tranlap1602/OpenCB/releases/latest';
 const String _latestReleaseUrl =
     'https://github.com/tranlap1602/OpenCB/releases/latest';
+const int _maxCrashLogBytes = 1024 * 1024;
 
-void main() {
+Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  await _initializeCrashReporting();
   _configureAndroidEdgeToEdge();
   runApp(const OpenCbApp());
+}
+
+Future<void> _initializeCrashReporting() async {
+  File? crashFile;
+  try {
+    crashFile = await _crashReportFile();
+    await crashFile.parent.create(recursive: true);
+  } catch (_) {
+    crashFile = null;
+  }
+
+  final previousFlutterHandler = FlutterError.onError;
+  FlutterError.onError = (details) {
+    _writeCrashRecord(
+      crashFile,
+      source: 'Flutter framework',
+      error: details.exception,
+      stackTrace: details.stack,
+      context: details.context?.toDescription(),
+      library: details.library,
+    );
+    if (previousFlutterHandler != null) {
+      previousFlutterHandler(details);
+    } else {
+      FlutterError.presentError(details);
+    }
+  };
+
+  final previousPlatformHandler = ui.PlatformDispatcher.instance.onError;
+  ui.PlatformDispatcher.instance.onError = (error, stackTrace) {
+    _writeCrashRecord(
+      crashFile,
+      source: 'Dart platform dispatcher',
+      error: error,
+      stackTrace: stackTrace,
+    );
+    return previousPlatformHandler?.call(error, stackTrace) ?? false;
+  };
+}
+
+void _writeCrashRecord(
+  File? file, {
+  required String source,
+  required Object error,
+  StackTrace? stackTrace,
+  String? context,
+  String? library,
+}) {
+  if (file == null) return;
+  try {
+    file.parent.createSync(recursive: true);
+    if (file.existsSync() && file.lengthSync() >= _maxCrashLogBytes) {
+      file.writeAsStringSync(
+        'OpenCB crash log rotated at ${DateTime.now().toIso8601String()}\n\n',
+        flush: true,
+      );
+    }
+    final buffer = StringBuffer()
+      ..writeln('=== OpenCB crash ===')
+      ..writeln('Time: ${DateTime.now().toIso8601String()}')
+      ..writeln('Version: $_appVersionLabel')
+      ..writeln(
+        'Platform: ${Platform.operatingSystem} ${Platform.operatingSystemVersion}',
+      )
+      ..writeln('Source: $source');
+    if (library != null && library.isNotEmpty) {
+      buffer.writeln('Library: $library');
+    }
+    if (context != null && context.isNotEmpty) {
+      buffer.writeln('Context: $context');
+    }
+    buffer
+      ..writeln('Error: $error')
+      ..writeln('Stack trace:')
+      ..writeln(stackTrace ?? StackTrace.current)
+      ..writeln();
+    file.writeAsStringSync(
+      buffer.toString(),
+      mode: FileMode.append,
+      flush: true,
+    );
+  } catch (_) {
+    // Crash reporting must never interfere with app startup or error handling.
+  }
 }
 
 void _configureAndroidEdgeToEdge() {
@@ -93,10 +179,13 @@ enum AppLanguage {
 
   String get storageValue => name;
 
-  static AppLanguage fromStorageValue(String? value) {
+  static AppLanguage fromStorageValue(
+    String? value, {
+    AppLanguage fallback = AppLanguage.system,
+  }) {
     return AppLanguage.values.firstWhere(
       (language) => language.storageValue == value,
-      orElse: () => AppLanguage.system,
+      orElse: () => fallback,
     );
   }
 }
@@ -108,9 +197,12 @@ extension AppLocalizationsX on BuildContext {
 const double _compactDesktopLayoutBreakpoint = 1020;
 const double _mobileLayoutBreakpoint = 840;
 const int _defaultRetentionLimit = 2000;
-const Duration _discoveredDeviceOnlineWindow = Duration(seconds: 20);
+const Duration _legacyDiscoveredDeviceOnlineWindow = Duration(seconds: 100);
+const Duration _minimumDiscoveredDeviceOnlineWindow = Duration(seconds: 60);
 const Duration _discoveredDeviceCacheWindow = Duration(minutes: 3);
 const Duration _discoveredDevicePruneInterval = Duration(seconds: 12);
+const Duration _discoveryForegroundInterval = Duration(seconds: 30);
+const Duration _discoverySleepingInterval = Duration(seconds: 30);
 const Duration _discoveryReplyThrottle = Duration(seconds: 8);
 const Duration _discoverySubnetSweepInterval = Duration(seconds: 24);
 
@@ -365,6 +457,9 @@ class DiscoveredSyncDevice {
     required this.port,
     required this.filePort,
     required this.lastSeenAt,
+    this.available = true,
+    this.beaconIntervalMs,
+    this.sentAt,
   });
 
   final String id;
@@ -373,8 +468,25 @@ class DiscoveredSyncDevice {
   final int port;
   final int filePort;
   final DateTime lastSeenAt;
+  final bool available;
+  final int? beaconIntervalMs;
+  final DateTime? sentAt;
 
   String get endpoint => '$host:$port';
+
+  Duration get onlineWindow {
+    final intervalMs = beaconIntervalMs;
+    if (intervalMs == null || intervalMs <= 0) {
+      return _legacyDiscoveredDeviceOnlineWindow;
+    }
+    final adaptiveMs = intervalMs * 3 + 10000;
+    return Duration(
+      milliseconds: math.max(
+        _minimumDiscoveredDeviceOnlineWindow.inMilliseconds,
+        adaptiveMs,
+      ),
+    );
+  }
 
   SyncPeer toPeer({required String pairCode}) {
     return SyncPeer(
@@ -386,6 +498,48 @@ class DiscoveredSyncDevice {
       filePort: filePort,
     );
   }
+}
+
+enum _LanDiagnosticLevel { info, success, warning, error }
+
+class _LanDiagnosticEvent {
+  const _LanDiagnosticEvent({
+    required this.at,
+    required this.message,
+    this.level = _LanDiagnosticLevel.info,
+  });
+
+  final DateTime at;
+  final String message;
+  final _LanDiagnosticLevel level;
+}
+
+class _LanDiagnosticSnapshot {
+  const _LanDiagnosticSnapshot({
+    required this.lanEnabled,
+    required this.localEndpoint,
+    required this.syncServerActive,
+    required this.fileServerActive,
+    required this.discoveryActive,
+    required this.appInForeground,
+    required this.screenAwake,
+    required this.beaconInterval,
+    required this.pairedCount,
+    required this.onlineCount,
+    required this.visibleCount,
+  });
+
+  final bool lanEnabled;
+  final String localEndpoint;
+  final bool syncServerActive;
+  final bool fileServerActive;
+  final bool discoveryActive;
+  final bool appInForeground;
+  final bool screenAwake;
+  final Duration beaconInterval;
+  final int pairedCount;
+  final int onlineCount;
+  final int visibleCount;
 }
 
 enum FileTransferDirection { send, receive }
@@ -1099,6 +1253,7 @@ class _OpenCbAppState extends State<OpenCbApp> with WidgetsBindingObserver {
       final mode = _themeModeFromName(decoded['themeMode'] as String?);
       final language = AppLanguage.fromStorageValue(
         decoded['language'] as String?,
+        fallback: Platform.isWindows ? AppLanguage.vi : AppLanguage.system,
       );
       if (!mounted) return;
       setState(() {
@@ -1354,7 +1509,6 @@ class _ClipboardHomePageState extends State<ClipboardHomePage>
   final PageController _mobilePageController = PageController();
   final GlobalKey _desktopDetailActionBarKey = GlobalKey();
   Timer? _pollTimer;
-  Timer? _autoSyncTimer;
   Timer? _discoveryTimer;
   ServerSocket? _syncServer;
   ServerSocket? _fileTransferServer;
@@ -1369,6 +1523,7 @@ class _ClipboardHomePageState extends State<ClipboardHomePage>
   bool _lanSyncEnabled = true;
   bool _loaded = false;
   bool _autoSyncInFlight = false;
+  bool _catchUpSyncPending = false;
   bool _quickPickerMode = false;
   bool _quickPickerClosing = false;
   bool _openingMainFromQuickPicker = false;
@@ -1376,6 +1531,7 @@ class _ClipboardHomePageState extends State<ClipboardHomePage>
   bool _mobileSearchOpen = false;
   bool _checkingForUpdates = false;
   bool _appInForeground = true;
+  bool _androidScreenAwake = true;
   DateTime _lastDiscoveredDevicePruneAt = DateTime.fromMillisecondsSinceEpoch(
     0,
   );
@@ -1403,14 +1559,18 @@ class _ClipboardHomePageState extends State<ClipboardHomePage>
   final Set<String> _pendingDeleteIds = {};
   final Map<String, Timer> _pendingDeleteTimers = {};
   final Map<String, DateTime> _syncTombstones = {};
-  final Map<String, DateTime> _peerDiscoveryRetryAfter = {};
   final Map<String, DateTime> _discoveryReplyAfter = {};
+  final Set<String> _catchUpSyncedPeerIds = {};
   final Map<String, ({int bytes, DateTime at})> _fileTransferSpeedSamples = {};
   final Map<String, Completer<bool>> _pendingFileOfferDecisions = {};
   final Map<String, FileTransferRecord> _pendingFileOfferRecords = {};
   final Map<String, Socket> _activeFileTransferSockets = {};
   final Set<String> _canceledFileTransferIds = {};
   final Set<String> _fileTransferTargetIds = {};
+  final List<Timer> _discoveryWakeBurstTimers = [];
+  final Map<String, Timer> _deviceOfflineTimers = {};
+  final List<_LanDiagnosticEvent> _lanDiagnosticEvents = [];
+  final Map<String, int> _peerLatencyMs = {};
   OverlayEntry? _noticeOverlayEntry;
   Timer? _noticeOverlayTimer;
   bool _showingPendingFileOfferDialog = false;
@@ -1422,6 +1582,33 @@ class _ClipboardHomePageState extends State<ClipboardHomePage>
   List<FileTransferFile> _selectedTransferFiles = [];
   final List<String> _pendingAndroidClipboardTexts = [];
   Map<String, DiscoveredSyncDevice> _discoveredDevices = {};
+
+  _LanDiagnosticSnapshot get _lanDiagnosticSnapshot => _LanDiagnosticSnapshot(
+    lanEnabled: _lanSyncEnabled,
+    localEndpoint: '$_syncHost:$_syncPort',
+    syncServerActive: _syncServer != null,
+    fileServerActive: _fileTransferServer != null,
+    discoveryActive: _discoverySocket != null,
+    appInForeground: _appInForeground,
+    screenAwake: !Platform.isAndroid || _androidScreenAwake,
+    beaconInterval: _currentDiscoveryInterval,
+    pairedCount: _peers.length,
+    onlineCount: _onlineSyncPeers.length,
+    visibleCount: _discoveredDevices.length,
+  );
+
+  void _recordLanDiagnostic(
+    String message, {
+    _LanDiagnosticLevel level = _LanDiagnosticLevel.info,
+  }) {
+    _lanDiagnosticEvents.insert(
+      0,
+      _LanDiagnosticEvent(at: DateTime.now(), message: message, level: level),
+    );
+    if (_lanDiagnosticEvents.length > 120) {
+      _lanDiagnosticEvents.removeRange(120, _lanDiagnosticEvents.length);
+    }
+  }
 
   @override
   void initState() {
@@ -1439,8 +1626,15 @@ class _ClipboardHomePageState extends State<ClipboardHomePage>
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
     _pollTimer?.cancel();
-    _autoSyncTimer?.cancel();
     _discoveryTimer?.cancel();
+    for (final timer in _discoveryWakeBurstTimers) {
+      timer.cancel();
+    }
+    _discoveryWakeBurstTimers.clear();
+    for (final timer in _deviceOfflineTimers.values) {
+      timer.cancel();
+    }
+    _deviceOfflineTimers.clear();
     _discoverySocket?.close();
     for (final timer in _pendingDeleteTimers.values) {
       timer.cancel();
@@ -1467,11 +1661,16 @@ class _ClipboardHomePageState extends State<ClipboardHomePage>
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     _appInForeground = state == AppLifecycleState.resumed;
+    _configureDiscoveryTimer();
     if (_appInForeground) {
+      if (Platform.isAndroid) _catchUpSyncedPeerIds.clear();
       unawaited(_refreshAndroidBatteryOptimizationStatus());
       unawaited(_captureClipboardText());
-      unawaited(_syncAllPeers());
+      unawaited(_refreshAndroidScreenState());
+      _sendDiscoveryWakeBurst();
       unawaited(_showNextPendingFileOfferDialog());
+    } else {
+      unawaited(_refreshAndroidScreenState());
     }
   }
 
@@ -1517,6 +1716,17 @@ class _ClipboardHomePageState extends State<ClipboardHomePage>
         await _sendClipboardFromNotification(args['text']?.toString());
       } else if (action == 'pickFiles') {
         await _pickTransferFilesFromNotification();
+      }
+      return null;
+    }
+    if (call.method == 'androidScreenState') {
+      final args = call.arguments;
+      if (args is! Map) return null;
+      final state = args['state']?.toString();
+      if (state == 'on' || state == 'userPresent') {
+        _setAndroidScreenAwake(true);
+      } else if (state == 'off') {
+        _setAndroidScreenAwake(false);
       }
       return null;
     }
@@ -2294,12 +2504,13 @@ class _ClipboardHomePageState extends State<ClipboardHomePage>
   }
 
   Future<void> _initializeSync() async {
+    _recordLanDiagnostic('Khởi tạo dịch vụ LAN.');
     await _loadSyncIdentity();
     await _loadPeers();
+    await _refreshAndroidScreenState();
     await _startSyncServer();
     await _startFileTransferServer();
     await _startLanDiscovery();
-    _startAutoSync();
     unawaited(_syncAndroidBackgroundNotificationDevices(force: true));
   }
 
@@ -2387,6 +2598,17 @@ class _ClipboardHomePageState extends State<ClipboardHomePage>
     unawaited(_syncAndroidBackgroundNotificationDevices(force: true));
   }
 
+  Future<void> _refreshAndroidScreenState() async {
+    if (!Platform.isAndroid) return;
+    try {
+      final interactive = await _platformChannel.invokeMethod<bool>(
+        'isScreenInteractive',
+      );
+      if (interactive == null) return;
+      _setAndroidScreenAwake(interactive, sendWakeBurst: false);
+    } catch (_) {}
+  }
+
   Future<void> _savePeers() async {
     final file = await _peersFile();
     await file.parent.create(recursive: true);
@@ -2406,10 +2628,18 @@ class _ClipboardHomePageState extends State<ClipboardHomePage>
         shared: true,
       );
       _syncServer!.listen(_handleSyncSocket, onError: (_) {});
+      _recordLanDiagnostic(
+        'Sync server đang lắng nghe tại $_syncHost:$_syncPort.',
+        level: _LanDiagnosticLevel.success,
+      );
       if (mounted) {
         setState(() => _syncError = null);
       }
     } catch (error) {
+      _recordLanDiagnostic(
+        'Không mở được sync server trên port $_syncPort: ${_friendlySyncError(error)}',
+        level: _LanDiagnosticLevel.error,
+      );
       if (mounted) {
         setState(() => _syncError = 'Port $_syncPort không khả dụng');
       }
@@ -2430,7 +2660,15 @@ class _ClipboardHomePageState extends State<ClipboardHomePage>
         shared: true,
       );
       _fileTransferServer!.listen(_handleFileTransferSocket, onError: (_) {});
+      _recordLanDiagnostic(
+        'File server đang lắng nghe trên port $_defaultFileTransferPort.',
+        level: _LanDiagnosticLevel.success,
+      );
     } catch (error) {
+      _recordLanDiagnostic(
+        'Không mở được file server: ${_friendlySyncError(error)}',
+        level: _LanDiagnosticLevel.error,
+      );
       if (mounted && _syncError == null) {
         setState(
           () =>
@@ -2461,19 +2699,29 @@ class _ClipboardHomePageState extends State<ClipboardHomePage>
       socket.broadcastEnabled = true;
       socket.listen(_handleDiscoveryEvent, onError: (_) {});
       _discoverySocket = socket;
+      _recordLanDiagnostic(
+        'LAN discovery đã hoạt động, beacon mỗi ${_currentDiscoveryInterval.inSeconds} giây.',
+        level: _LanDiagnosticLevel.success,
+      );
       unawaited(_sendDiscoveryBeacon());
       unawaited(_syncAndroidBackgroundNotificationDevices(force: true));
-      _discoveryTimer?.cancel();
-      _discoveryTimer = Timer.periodic(const Duration(seconds: 4), (_) {
-        unawaited(_sendDiscoveryBeacon());
-        unawaited(_syncAndroidBackgroundNotificationDevices());
-      });
-    } catch (_) {}
+      _configureDiscoveryTimer();
+    } catch (error) {
+      _recordLanDiagnostic(
+        'Không mở được LAN discovery: ${_friendlySyncError(error)}',
+        level: _LanDiagnosticLevel.error,
+      );
+    }
   }
 
   void _stopLanDiscovery() {
     _discoveryTimer?.cancel();
     _discoveryTimer = null;
+    for (final timer in _deviceOfflineTimers.values) {
+      timer.cancel();
+    }
+    _deviceOfflineTimers.clear();
+    _catchUpSyncedPeerIds.clear();
     _discoverySocket?.close();
     _discoverySocket = null;
     if (mounted) setState(() => _discoveredDevices = {});
@@ -2490,16 +2738,102 @@ class _ClipboardHomePageState extends State<ClipboardHomePage>
     }
   }
 
-  Future<void> _sendDiscoveryBeacon() async {
+  bool get _androidDiscoveryAwake => !Platform.isAndroid || _androidScreenAwake;
+
+  Duration get _currentDiscoveryInterval => _androidDiscoveryAwake
+      ? _discoveryForegroundInterval
+      : _discoverySleepingInterval;
+
+  void _configureDiscoveryTimer() {
+    if (_discoverySocket == null) return;
+    _discoveryTimer?.cancel();
+    _discoveryTimer = Timer.periodic(_currentDiscoveryInterval, (_) {
+      unawaited(_sendDiscoveryBeacon());
+      unawaited(_syncAndroidBackgroundNotificationDevices());
+    });
+  }
+
+  void _setAndroidScreenAwake(bool awake, {bool sendWakeBurst = true}) {
+    if (!Platform.isAndroid) return;
+    final changed = _androidScreenAwake != awake;
+    if (changed && !awake) {
+      unawaited(_sendDiscoveryBeacon(force: true, availability: 'sleeping'));
+    }
+    _androidScreenAwake = awake;
+    if (changed) {
+      _catchUpSyncedPeerIds.clear();
+      _recordLanDiagnostic(
+        awake
+            ? 'Màn hình đã bật, khởi động lại discovery.'
+            : 'Màn hình đã tắt, thông báo trạng thái ngủ tới thiết bị LAN.',
+      );
+      _configureDiscoveryTimer();
+      if (mounted) setState(() {});
+    }
+    if (awake && sendWakeBurst) {
+      _sendDiscoveryWakeBurst();
+    } else if (!awake) {
+      _cancelDiscoveryWakeBurst();
+      _pruneStaleDiscoveredDevices();
+      unawaited(_syncAndroidBackgroundNotificationDevices(force: true));
+    }
+  }
+
+  void _cancelDiscoveryWakeBurst() {
+    for (final timer in _discoveryWakeBurstTimers) {
+      timer.cancel();
+    }
+    _discoveryWakeBurstTimers.clear();
+  }
+
+  void _sendDiscoveryWakeBurst() {
+    if (!_lanSyncEnabled ||
+        _discoverySocket == null ||
+        !_androidDiscoveryAwake) {
+      return;
+    }
+    _cancelDiscoveryWakeBurst();
+    unawaited(_sendDiscoveryBeacon(force: true));
+    _discoveryWakeBurstTimers
+      ..add(
+        Timer(const Duration(milliseconds: 650), () {
+          unawaited(_sendDiscoveryBeacon(force: true));
+        }),
+      )
+      ..add(
+        Timer(const Duration(milliseconds: 1600), () {
+          unawaited(_sendDiscoveryBeacon(force: true));
+        }),
+      )
+      ..add(
+        Timer(const Duration(milliseconds: 2600), () {
+          if (_lanSyncEnabled && _androidDiscoveryAwake) {
+            unawaited(_syncCatchUpForOnlinePeers());
+          }
+        }),
+      );
+  }
+
+  Future<void> _sendDiscoveryBeacon({
+    bool force = false,
+    String? availability,
+  }) async {
     final socket = _discoverySocket;
     if (!_lanSyncEnabled || socket == null) return;
     _pruneStaleDiscoveredDevices();
+    if (!force && !_androidDiscoveryAwake) {
+      if (mounted && _discoveredDevices.isNotEmpty) {
+        setState(() {});
+      }
+      unawaited(_syncAndroidBackgroundNotificationDevices());
+      return;
+    }
     final detectedHost = await _detectLanIpv4Address();
     final beaconHost = detectedHost ?? _syncHost;
     if (mounted && detectedHost != null && detectedHost != _syncHost) {
       setState(() => _syncHost = detectedHost);
     }
-    final payload = _discoveryPayload(beaconHost);
+    final payload = _discoveryPayload(beaconHost, availability: availability);
     final bytes = utf8.encode(payload);
     final targets = {
       for (final target in await _discoveryBroadcastTargets()) target.address,
@@ -2518,9 +2852,12 @@ class _ClipboardHomePageState extends State<ClipboardHomePage>
         socket.send(bytes, InternetAddress(target), _syncPort);
       } catch (_) {}
     }
+    if (mounted && _discoveredDevices.isNotEmpty) {
+      setState(() {});
+    }
   }
 
-  String _discoveryPayload(String beaconHost) {
+  String _discoveryPayload(String beaconHost, {String? availability}) {
     return jsonEncode({
       'protocol': _discoveryProtocol,
       'deviceId': _syncIdentity.deviceId,
@@ -2528,12 +2865,21 @@ class _ClipboardHomePageState extends State<ClipboardHomePage>
       'host': beaconHost,
       'port': _syncPort,
       'filePort': _defaultFileTransferPort,
+      'availability':
+          availability ?? (_androidDiscoveryAwake ? 'awake' : 'sleeping'),
+      'beaconIntervalMs': _currentDiscoveryInterval.inMilliseconds,
+      'sentAt': DateTime.now().toUtc().toIso8601String(),
     });
   }
 
   Future<void> _sendDiscoveryReply(String target) async {
     final socket = _discoverySocket;
-    if (!_lanSyncEnabled || socket == null || !_isUsableLanIpv4(target)) return;
+    if (!_lanSyncEnabled ||
+        socket == null ||
+        !_androidDiscoveryAwake ||
+        !_isUsableLanIpv4(target)) {
+      return;
+    }
     final now = DateTime.now();
     final retryAfter = _discoveryReplyAfter[target];
     if (retryAfter != null && now.isBefore(retryAfter)) return;
@@ -2571,6 +2917,12 @@ class _ClipboardHomePageState extends State<ClipboardHomePage>
       final filePort = filePortValue is int
           ? filePortValue
           : int.tryParse('$filePortValue');
+      final availability = decoded['availability']?.toString();
+      final beaconIntervalValue = decoded['beaconIntervalMs'];
+      final beaconIntervalMs = beaconIntervalValue is int
+          ? beaconIntervalValue
+          : int.tryParse('$beaconIntervalValue');
+      final sentAt = DateTime.tryParse(decoded['sentAt']?.toString() ?? '');
       if (!_isUsableLanIpv4(host) ||
           port == null ||
           port <= 0 ||
@@ -2589,22 +2941,47 @@ class _ClipboardHomePageState extends State<ClipboardHomePage>
             ? _defaultFileTransferPort
             : filePort,
         lastSeenAt: DateTime.now(),
+        available: availability != 'sleeping',
+        beaconIntervalMs: beaconIntervalMs,
+        sentAt: sentAt,
       );
       _rememberDiscoveredDevice(discovered);
-      unawaited(_sendDiscoveryReply(datagram.address.address));
+      if (discovered.available) {
+        unawaited(_sendDiscoveryReply(datagram.address.address));
+      }
     } catch (_) {}
   }
 
   void _rememberDiscoveredDevice(DiscoveredSyncDevice device) {
     var shouldSavePeers = false;
     final peerIndex = _peers.indexWhere((peer) => peer.id == device.id);
+    final previous = _discoveredDevices[device.id];
+    final wasOnline = previous != null && _isDiscoveredDeviceOnline(previous);
+    final isOnline = _isDiscoveredDeviceOnline(device);
+    if (previous == null ||
+        wasOnline != isOnline ||
+        previous.host != device.host ||
+        previous.available != device.available) {
+      final state = isOnline
+          ? 'online tại ${device.endpoint}'
+          : device.available
+          ? 'không còn beacon hợp lệ'
+          : 'đã chuyển sang trạng thái ngủ';
+      _recordLanDiagnostic(
+        '${device.name}: $state.',
+        level: isOnline
+            ? _LanDiagnosticLevel.success
+            : _LanDiagnosticLevel.warning,
+      );
+    }
     setState(() {
       _discoveredDevices = {..._discoveredDevices, device.id: device};
       if (peerIndex >= 0) {
         final peer = _peers[peerIndex];
         if (peer.host != device.host ||
             peer.port != device.port ||
-            peer.filePort != device.filePort) {
+            peer.filePort != device.filePort ||
+            peer.lastError != null) {
           _peers[peerIndex] = peer.copyWith(
             host: device.host,
             port: device.port,
@@ -2615,13 +2992,47 @@ class _ClipboardHomePageState extends State<ClipboardHomePage>
         }
       }
     });
+    _scheduleDeviceOfflineDeadline(device);
     if (shouldSavePeers) unawaited(_savePeers());
     unawaited(_syncAndroidBackgroundNotificationDevices());
-    if (peerIndex >= 0) _maybeRetryDiscoveredPeer(device.id);
+    if (!isOnline) {
+      _catchUpSyncedPeerIds.remove(device.id);
+    } else if (peerIndex >= 0 && !wasOnline) {
+      unawaited(_syncCatchUpForOnlinePeers());
+    }
+  }
+
+  void _scheduleDeviceOfflineDeadline(DiscoveredSyncDevice device) {
+    _deviceOfflineTimers.remove(device.id)?.cancel();
+    if (!device.available) return;
+    _deviceOfflineTimers[device.id] = Timer(
+      device.onlineWindow + const Duration(milliseconds: 250),
+      () {
+        _deviceOfflineTimers.remove(device.id);
+        final current = _discoveredDevices[device.id];
+        if (current == null ||
+            current.lastSeenAt != device.lastSeenAt ||
+            _isDiscoveredDeviceOnline(current)) {
+          return;
+        }
+        _catchUpSyncedPeerIds.remove(device.id);
+        _recordLanDiagnostic(
+          '${current.name}: offline do không nhận beacon trong ${current.onlineWindow.inSeconds} giây.',
+          level: _LanDiagnosticLevel.warning,
+        );
+        if (mounted) setState(() {});
+        unawaited(_syncAndroidBackgroundNotificationDevices(force: true));
+      },
+    );
   }
 
   void _pruneStaleDiscoveredDevices() {
     final now = DateTime.now();
+    _catchUpSyncedPeerIds.removeWhere((peerId) {
+      final peerIndex = _peers.indexWhere((item) => item.id == peerId);
+      return peerIndex < 0 ||
+          !_isPeerOnlineByBeacon(_peers[peerIndex], now: now);
+    });
     if (now.difference(_lastDiscoveredDevicePruneAt) <
         _discoveredDevicePruneInterval) {
       return;
@@ -2634,6 +3045,13 @@ class _ClipboardHomePageState extends State<ClipboardHomePage>
       ),
     );
     if (freshDevices.length == _discoveredDevices.length) return;
+    final freshIds = freshDevices.keys.toSet();
+    for (final staleId
+        in _deviceOfflineTimers.keys
+            .where((id) => !freshIds.contains(id))
+            .toList()) {
+      _deviceOfflineTimers.remove(staleId)?.cancel();
+    }
     if (mounted) {
       setState(() => _discoveredDevices = freshDevices);
     } else {
@@ -2642,21 +3060,35 @@ class _ClipboardHomePageState extends State<ClipboardHomePage>
     unawaited(_syncAndroidBackgroundNotificationDevices());
   }
 
-  void _maybeRetryDiscoveredPeer(String peerId) {
-    if (!_lanSyncEnabled) return;
-    final peerIndex = _peers.indexWhere((peer) => peer.id == peerId);
-    if (peerIndex < 0) return;
-    final peer = _peers[peerIndex];
+  bool _isPeerOnlineByBeacon(SyncPeer peer, {DateTime? now}) {
+    final discovered = _discoveredDevices[peer.id];
+    if (discovered == null) return false;
+    return _isDiscoveredDeviceOnline(discovered, now: now);
+  }
+
+  bool _isDiscoveredDeviceOnline(DiscoveredSyncDevice device, {DateTime? now}) {
+    if (!device.available) return false;
+    final referenceTime = now ?? DateTime.now();
+    return referenceTime.difference(device.lastSeenAt) <= device.onlineWindow;
+  }
+
+  SyncPeer _peerWithFreshDiscoveryEndpoint(SyncPeer peer) {
+    final discovered = _discoveredDevices[peer.id];
+    if (discovered == null) return peer;
+    return peer.copyWith(
+      host: discovered.host,
+      port: discovered.port,
+      filePort: discovered.filePort,
+      clearError: true,
+    );
+  }
+
+  List<SyncPeer> get _onlineSyncPeers {
     final now = DateTime.now();
-    final recentGoodSync =
-        peer.lastError == null &&
-        peer.lastSyncedAt != null &&
-        now.difference(peer.lastSyncedAt!) < const Duration(seconds: 35);
-    if (recentGoodSync) return;
-    final retryAfter = _peerDiscoveryRetryAfter[peerId];
-    if (retryAfter != null && now.isBefore(retryAfter)) return;
-    _peerDiscoveryRetryAfter[peerId] = now.add(const Duration(seconds: 24));
-    unawaited(_syncPeer(peer));
+    return List<SyncPeer>.from(_peers)
+        .where((peer) => _isPeerOnlineByBeacon(peer, now: now))
+        .map(_peerWithFreshDiscoveryEndpoint)
+        .toList();
   }
 
   Future<void> _handleSyncSocket(Socket socket) async {
@@ -3051,15 +3483,16 @@ class _ClipboardHomePageState extends State<ClipboardHomePage>
     }
   }
 
-  Future<void> _mergeSyncedEntries(
+  Future<int> _mergeSyncedEntries(
     List<ClipboardEntry> incoming,
     String? deviceName, {
     bool touchExisting = false,
     bool replaceMetadata = false,
   }) async {
     var changed = false;
+    var changedEntries = 0;
     final storage = _storage;
-    if (storage == null) return;
+    if (storage == null) return 0;
     final existingEntries = await storage.listItems(limit: _entryLoadLimit);
     final existingByBody = <String, ClipboardEntry>{};
     String? newestRealtimeBody;
@@ -3071,6 +3504,7 @@ class _ClipboardHomePageState extends State<ClipboardHomePage>
     }
 
     for (final remote in incoming.where(_isLanSyncableEntry)) {
+      var remoteChanged = false;
       final body = remote.body ?? remote.preview;
       final normalizedBody = body.trim();
       if (normalizedBody.isEmpty) continue;
@@ -3092,6 +3526,7 @@ class _ClipboardHomePageState extends State<ClipboardHomePage>
         if (stored != null) {
           existingByBody[normalizedBody] = stored;
           changed = true;
+          remoteChanged = true;
         }
       }
 
@@ -3105,6 +3540,7 @@ class _ClipboardHomePageState extends State<ClipboardHomePage>
         stored = stored.copyWith(pinned: remote.pinned);
         existingByBody[normalizedBody] = stored;
         changed = true;
+        remoteChanged = true;
       }
 
       final currentTags = stored.tags.toSet();
@@ -3119,7 +3555,9 @@ class _ClipboardHomePageState extends State<ClipboardHomePage>
         stored = stored.copyWith(tags: tags);
         existingByBody[normalizedBody] = stored;
         changed = true;
+        remoteChanged = true;
       }
+      if (remoteChanged) changedEntries++;
     }
 
     if (_clipboardSettings.autoSetClipboardFromSync &&
@@ -3129,10 +3567,11 @@ class _ClipboardHomePageState extends State<ClipboardHomePage>
       await _setSyncedClipboardText(newestRealtimeBody);
     }
 
-    if (!changed) return;
+    if (!changed) return 0;
     await storage.applyRetention(maxItems: _clipboardSettings.retentionLimit);
     await _loadEntries(captureCurrentClipboard: false);
     if (mounted) setState(() {});
+    return changedEntries;
   }
 
   Future<void> _setSyncedClipboardText(String text) async {
@@ -3293,18 +3732,35 @@ class _ClipboardHomePageState extends State<ClipboardHomePage>
         response['tagDefinitions'],
         replaceExisting: false,
       );
-      await _mergeSyncedEntries(incoming, response['deviceName'] as String?);
+      final mergedCount = await _mergeSyncedEntries(
+        incoming,
+        response['deviceName'] as String?,
+      );
 
       if (index >= 0) {
+        final recoveredFromError = _peers[index].lastError != null;
         _updatePeerFromSyncPayload(
           response,
           fallbackPeer: peer,
           markSynced: true,
         );
+        if (mergedCount > 0 || recoveredFromError) {
+          _recordLanDiagnostic(
+            mergedCount == 0
+                ? 'Kết nối sync với ${peer.name} đã phục hồi.'
+                : 'Đã gộp $mergedCount mục mới từ ${peer.name}.',
+            level: _LanDiagnosticLevel.success,
+          );
+        }
       }
     } catch (error) {
+      final message = _friendlySyncError(error);
+      _recordLanDiagnostic(
+        'Sync ${peer.name} thất bại: $message',
+        level: _LanDiagnosticLevel.error,
+      );
       if (index >= 0) {
-        _peers[index] = peer.copyWith(lastError: _friendlySyncError(error));
+        _peers[index] = peer.copyWith(lastError: message);
       }
     }
     if (mounted) setState(() {});
@@ -3405,10 +3861,10 @@ class _ClipboardHomePageState extends State<ClipboardHomePage>
     Map<String, DateTime> tombstones,
   ) async {
     if (!_lanSyncEnabled || _peers.isEmpty || tombstones.isEmpty) return;
+    final peers = _onlineSyncPeers;
+    if (peers.isEmpty) return;
     await Future.wait(
-      List<SyncPeer>.from(
-        _peers,
-      ).map((peer) => _pushTombstonesToPeer(peer, tombstones)),
+      peers.map((peer) => _pushTombstonesToPeer(peer, tombstones)),
     );
   }
 
@@ -3448,9 +3904,9 @@ class _ClipboardHomePageState extends State<ClipboardHomePage>
 
   Future<void> _sendDeviceUpdatedToOnlinePeers() async {
     if (!_lanSyncEnabled || _peers.isEmpty) return;
-    await Future.wait(
-      List<SyncPeer>.from(_peers).map(_sendDeviceUpdatedToPeer),
-    );
+    final peers = _onlineSyncPeers;
+    if (peers.isEmpty) return;
+    await Future.wait(peers.map(_sendDeviceUpdatedToPeer));
     if (mounted) setState(() {});
     await _savePeers();
   }
@@ -3463,8 +3919,10 @@ class _ClipboardHomePageState extends State<ClipboardHomePage>
     if (!_lanSyncEnabled || _peers.isEmpty || items.isEmpty) {
       return;
     }
+    final peers = _onlineSyncPeers;
+    if (peers.isEmpty) return;
     await Future.wait(
-      List<SyncPeer>.from(_peers).map(
+      peers.map(
         (peer) => _pushEntriesToPeer(peer, items, touchExisting: touchExisting),
       ),
     );
@@ -3478,14 +3936,37 @@ class _ClipboardHomePageState extends State<ClipboardHomePage>
   }
 
   Future<void> _syncAllPeers() async {
+    final peers = _onlineSyncPeers;
+    _catchUpSyncedPeerIds.addAll(peers.map((peer) => peer.id));
+    await _syncPeers(peers);
+  }
+
+  Future<void> _syncCatchUpForOnlinePeers() async {
+    if (_autoSyncInFlight) {
+      _catchUpSyncPending = true;
+      return;
+    }
+    final peers = _onlineSyncPeers
+        .where((peer) => !_catchUpSyncedPeerIds.contains(peer.id))
+        .toList();
+    if (peers.isEmpty) return;
+    _catchUpSyncedPeerIds.addAll(peers.map((peer) => peer.id));
+    _recordLanDiagnostic(
+      'Bắt đầu sync bù một lần cho ${peers.length} thiết bị vừa online.',
+    );
+    await _syncPeers(peers);
+  }
+
+  Future<void> _syncPeers(List<SyncPeer> peers) async {
     if (_autoSyncInFlight) return;
+    if (peers.isEmpty) return;
     if (mounted) {
       setState(() => _autoSyncInFlight = true);
     } else {
       _autoSyncInFlight = true;
     }
     try {
-      for (final peer in List<SyncPeer>.from(_peers)) {
+      for (final peer in peers) {
         await _syncPeer(peer);
       }
     } finally {
@@ -3494,15 +3975,11 @@ class _ClipboardHomePageState extends State<ClipboardHomePage>
       } else {
         _autoSyncInFlight = false;
       }
+      if (_catchUpSyncPending) {
+        _catchUpSyncPending = false;
+        scheduleMicrotask(_syncCatchUpForOnlinePeers);
+      }
     }
-  }
-
-  void _startAutoSync() {
-    _autoSyncTimer?.cancel();
-    _autoSyncTimer = Timer.periodic(const Duration(seconds: 45), (_) {
-      if (!_lanSyncEnabled || _peers.isEmpty) return;
-      _syncAllPeers();
-    });
   }
 
   Future<void> _loadFileTransfers() async {
@@ -3638,11 +4115,17 @@ class _ClipboardHomePageState extends State<ClipboardHomePage>
         actions: [
           TextButton(
             onPressed: () => Navigator.of(context).pop(false),
-            child: Text(context.l10n.cancel),
+            child: _ButtonLabel(
+              context.l10n.cancel,
+              alignment: _ControlLabelAlignment.buttonCentered,
+            ),
           ),
           FilledButton(
             onPressed: () => Navigator.of(context).pop(true),
-            child: Text(context.l10n.clear),
+            child: _ButtonLabel(
+              context.l10n.clear,
+              alignment: _ControlLabelAlignment.buttonCentered,
+            ),
           ),
         ],
       ),
@@ -3660,26 +4143,7 @@ class _ClipboardHomePageState extends State<ClipboardHomePage>
   }
 
   List<SyncPeer> get _onlineFileTransferPeers {
-    final cutoff = DateTime.now().subtract(_discoveredDeviceOnlineWindow);
-    final onlinePeers = _peers.where((peer) {
-      final discovered = _discoveredDevices[peer.id];
-      if (discovered != null && discovered.lastSeenAt.isAfter(cutoff)) {
-        return true;
-      }
-      return peer.lastError == null &&
-          peer.lastSyncedAt != null &&
-          peer.lastSyncedAt!.isAfter(cutoff);
-    });
-    return onlinePeers.map((peer) {
-        final discovered = _discoveredDevices[peer.id];
-        if (discovered == null) return peer;
-        return peer.copyWith(
-          host: discovered.host,
-          port: discovered.port,
-          filePort: discovered.filePort,
-          clearError: true,
-        );
-      }).toList()
+    return _onlineSyncPeers
       ..sort((a, b) => a.name.toLowerCase().compareTo(b.name.toLowerCase()));
   }
 
@@ -3871,12 +4335,18 @@ class _ClipboardHomePageState extends State<ClipboardHomePage>
           actions: [
             TextButton(
               onPressed: () => Navigator.of(context).pop(false),
-              child: Text(l10n.rejected),
+              child: _ButtonLabel(
+                l10n.rejected,
+                alignment: _ControlLabelAlignment.buttonCentered,
+              ),
             ),
             FilledButton.icon(
               onPressed: () => Navigator.of(context).pop(true),
               icon: const Icon(Icons.file_download_outlined),
-              label: Text(l10n.accept),
+              label: _ButtonLabel(
+                l10n.accept,
+                alignment: _ControlLabelAlignment.buttonCentered,
+              ),
             ),
           ],
         );
@@ -5210,14 +5680,20 @@ class _ClipboardHomePageState extends State<ClipboardHomePage>
           actions: [
             TextButton(
               onPressed: () => Navigator.of(context).pop(),
-              child: const Text('Để sau'),
+              child: const _ButtonLabel(
+                'Để sau',
+                alignment: _ControlLabelAlignment.buttonCentered,
+              ),
             ),
             FilledButton(
               onPressed: () {
                 Navigator.of(context).pop();
                 unawaited(_openExternalUrl(releaseUrl));
               },
-              child: const Text('Tải xuống'),
+              child: const _ButtonLabel(
+                'Tải xuống',
+                alignment: _ControlLabelAlignment.buttonCentered,
+              ),
             ),
           ],
         );
@@ -5745,6 +6221,165 @@ class _ClipboardHomePageState extends State<ClipboardHomePage>
     }
     if (!mounted) return;
     _showCenterSnackBar('Thư mục dữ liệu: ${directory.path}');
+  }
+
+  Future<void> _refreshLanDiagnostics() async {
+    await _refreshSyncHost();
+    await _refreshAndroidScreenState();
+    _pruneStaleDiscoveredDevices();
+    _sendDiscoveryWakeBurst();
+    await _syncAndroidBackgroundNotificationDevices(force: true);
+    _recordLanDiagnostic('Đã làm mới trạng thái chẩn đoán LAN.');
+    if (mounted) setState(() {});
+  }
+
+  Future<String> _saveTextReportToDownloads(
+    String fileName,
+    String content,
+  ) async {
+    String? publicDownloadToken;
+    try {
+      if (Platform.isAndroid) {
+        final download = await _openPublicDownloadFile(fileName);
+        publicDownloadToken = download.$1;
+        await _writePublicDownloadChunk(
+          publicDownloadToken,
+          Uint8List.fromList(utf8.encode(content)),
+        );
+        await _finishPublicDownloadFile(publicDownloadToken);
+        publicDownloadToken = null;
+        return download.$2;
+      }
+
+      final downloads = await getDownloadsDirectory();
+      final directory = downloads == null
+          ? await _opencbDataDirectory()
+          : Directory('${downloads.path}${Platform.pathSeparator}OpenCB');
+      await directory.create(recursive: true);
+      final file = File('${directory.path}${Platform.pathSeparator}$fileName');
+      await file.writeAsString(content, flush: true);
+      return file.path;
+    } catch (_) {
+      await _cancelPublicDownloadFile(
+        publicDownloadToken,
+      ).catchError((_) => false);
+      rethrow;
+    }
+  }
+
+  Future<void> _exportLanDiagnostics() async {
+    try {
+      final timestamp = DateTime.now()
+          .toIso8601String()
+          .replaceAll(':', '-')
+          .replaceAll('.', '-');
+      final fileName = 'opencb_lan_diagnostics_$timestamp.txt';
+      final snapshot = _lanDiagnosticSnapshot;
+      final now = DateTime.now();
+      final buffer = StringBuffer()
+        ..writeln('OpenCB LAN diagnostics')
+        ..writeln('Created: ${now.toIso8601String()}')
+        ..writeln('Platform: ${Platform.operatingSystem}')
+        ..writeln('LAN enabled: ${snapshot.lanEnabled}')
+        ..writeln('Local endpoint: ${snapshot.localEndpoint}')
+        ..writeln('Sync server: ${snapshot.syncServerActive}')
+        ..writeln('File server: ${snapshot.fileServerActive}')
+        ..writeln('Discovery socket: ${snapshot.discoveryActive}')
+        ..writeln('App foreground: ${snapshot.appInForeground}')
+        ..writeln('Screen awake: ${snapshot.screenAwake}')
+        ..writeln('Beacon interval: ${snapshot.beaconInterval.inSeconds}s')
+        ..writeln(
+          'Devices: ${snapshot.onlineCount} online / ${snapshot.pairedCount} paired / ${snapshot.visibleCount} visible',
+        )
+        ..writeln()
+        ..writeln('Paired devices:');
+      for (final peer in _peers) {
+        final discovered = _discoveredDevices[peer.id];
+        final age = discovered == null
+            ? 'never'
+            : '${now.difference(discovered.lastSeenAt).inSeconds}s';
+        buffer
+          ..writeln('- ${peer.name}')
+          ..writeln('  endpoint: ${peer.endpoint}')
+          ..writeln('  online: ${_isPeerOnlineByBeacon(peer, now: now)}')
+          ..writeln('  beacon age: $age')
+          ..writeln('  remote available: ${discovered?.available ?? false}')
+          ..writeln(
+            '  advertised interval: ${discovered?.beaconIntervalMs ?? 'unknown'}ms',
+          )
+          ..writeln('  last ping: ${_peerLatencyMs[peer.id] ?? 'unknown'}ms')
+          ..writeln(
+            '  last error: ${peer.lastError == null ? 'none' : _friendlySyncError(peer.lastError!)}',
+          );
+      }
+      buffer
+        ..writeln()
+        ..writeln('Recent events:');
+      for (final event in _lanDiagnosticEvents) {
+        buffer.writeln(
+          '${event.at.toIso8601String()} [${event.level.name.toUpperCase()}] ${event.message}',
+        );
+      }
+      final content = buffer.toString();
+      final displayPath = await _saveTextReportToDownloads(fileName, content);
+      _recordLanDiagnostic(
+        'Đã xuất log chẩn đoán LAN.',
+        level: _LanDiagnosticLevel.success,
+      );
+      if (mounted) {
+        _showCenterSnackBar('Đã xuất chẩn đoán LAN vào $displayPath.');
+        setState(() {});
+      }
+    } catch (error) {
+      _recordLanDiagnostic(
+        'Xuất log thất bại: ${_friendlySyncError(error)}',
+        level: _LanDiagnosticLevel.error,
+      );
+      if (mounted) {
+        _showCenterSnackBar('Không xuất được chẩn đoán LAN.');
+        setState(() {});
+      }
+    }
+  }
+
+  Future<void> _exportCrashReport() async {
+    try {
+      final now = DateTime.now();
+      final timestamp = now
+          .toIso8601String()
+          .replaceAll(':', '-')
+          .replaceAll('.', '-');
+      final crashFile = await _crashReportFile();
+      final recordedCrashes = await crashFile.exists()
+          ? await crashFile.readAsString()
+          : '';
+      final report = StringBuffer()
+        ..writeln('OpenCB crash report')
+        ..writeln('Created: ${now.toIso8601String()}')
+        ..writeln('Version: $_appVersionLabel')
+        ..writeln(
+          'Platform: ${Platform.operatingSystem} ${Platform.operatingSystemVersion}',
+        )
+        ..writeln('Dart: ${Platform.version}')
+        ..writeln()
+        ..writeln('Recorded crashes:')
+        ..writeln(
+          recordedCrashes.trim().isEmpty
+              ? 'No Flutter or Dart crashes have been recorded.'
+              : recordedCrashes.trim(),
+        );
+      final displayPath = await _saveTextReportToDownloads(
+        'opencb_crash_report_$timestamp.txt',
+        report.toString(),
+      );
+      if (!mounted) return;
+      _showCenterSnackBar(
+        '${context.l10n.crashReportExportedPrefix} $displayPath.',
+      );
+    } catch (_) {
+      if (!mounted) return;
+      _showCenterSnackBar(context.l10n.cannotExportCrashReport);
+    }
   }
 
   Future<void> _exportDataBackup() async {
@@ -6285,6 +6920,7 @@ class _ClipboardHomePageState extends State<ClipboardHomePage>
   Future<void> _testPeerConnection(SyncPeer peer) async {
     final l10n = context.l10n;
     final index = _peers.indexWhere((item) => item.id == peer.id);
+    final stopwatch = Stopwatch()..start();
     Socket? socket;
     try {
       socket = await Socket.connect(
@@ -6307,6 +6943,12 @@ class _ClipboardHomePageState extends State<ClipboardHomePage>
         throw Exception(response['error']);
       }
       final gotPong = response['action'] == 'pong';
+      stopwatch.stop();
+      _peerLatencyMs[peer.id] = stopwatch.elapsedMilliseconds;
+      _recordLanDiagnostic(
+        'Ping ${peer.name}: ${stopwatch.elapsedMilliseconds} ms.',
+        level: _LanDiagnosticLevel.success,
+      );
       if (index >= 0) {
         final changed = _updatePeerFromSyncPayload(
           response,
@@ -6328,7 +6970,13 @@ class _ClipboardHomePageState extends State<ClipboardHomePage>
             : '${peer.name}: ${l10n.connectionSuccess}',
       );
     } catch (error) {
+      stopwatch.stop();
       final message = _friendlySyncError(error);
+      _peerLatencyMs.remove(peer.id);
+      _recordLanDiagnostic(
+        'Ping ${peer.name} thất bại: $message',
+        level: _LanDiagnosticLevel.error,
+      );
       if (index >= 0) {
         setState(() => _peers[index] = peer.copyWith(lastError: message));
       }
@@ -6900,6 +7548,9 @@ class _ClipboardHomePageState extends State<ClipboardHomePage>
         syncHost: _syncHost,
         syncPort: _syncPort,
         syncError: _syncError,
+        diagnostics: _lanDiagnosticSnapshot,
+        diagnosticEvents: List.unmodifiable(_lanDiagnosticEvents),
+        peerLatenciesMs: Map.unmodifiable(_peerLatencyMs),
         onAddPeer: _addPeer,
         onScanPairQr: Platform.isAndroid ? _scanAndAddPeer : null,
         onCopyPairPayload: _copyLocalPairPayload,
@@ -6909,6 +7560,8 @@ class _ClipboardHomePageState extends State<ClipboardHomePage>
         onTestPeer: _testPeerConnection,
         onRenamePeer: _renamePeer,
         onRemovePeer: _confirmRemovePeer,
+        onRefreshDiagnostics: () => unawaited(_refreshLanDiagnostics()),
+        onExportDiagnostics: () => unawaited(_exportLanDiagnostics()),
       );
     }
 
@@ -6989,6 +7642,7 @@ class _ClipboardHomePageState extends State<ClipboardHomePage>
           ),
           onOpenLandingPage: () => unawaited(_openExternalUrl(_landingPageUrl)),
           onOpenGithub: () => unawaited(_openExternalUrl(_githubRepoUrl)),
+          onExportCrashReport: () => unawaited(_exportCrashReport()),
         ),
       );
     }
@@ -8911,7 +9565,7 @@ class _TopBar extends StatelessWidget {
                 OutlinedButton.icon(
                   onPressed: onOpenReceivedFolder,
                   icon: const Icon(Icons.folder_open),
-                  label: Text(context.l10n.openFolder),
+                  label: _ButtonLabel(context.l10n.openFolder),
                 ),
               ],
             ],
@@ -11135,6 +11789,7 @@ class _ExpressiveFabMenuActionState extends State<_ExpressiveFabMenuAction> {
                       icon: widget.icon,
                       label: widget.label,
                       color: contentColor,
+                      labelAlignment: _ControlLabelAlignment.motionContextMenu,
                     ),
                   ),
                   Opacity(
@@ -11143,6 +11798,7 @@ class _ExpressiveFabMenuActionState extends State<_ExpressiveFabMenuAction> {
                       icon: Icons.check_circle_outline,
                       label: successLabel,
                       color: contentColor,
+                      labelAlignment: _ControlLabelAlignment.motionContextMenu,
                     ),
                   ),
                   _AnimatedFeedbackLabel(
@@ -11151,6 +11807,7 @@ class _ExpressiveFabMenuActionState extends State<_ExpressiveFabMenuAction> {
                     label: widget.label,
                     successLabel: widget.successLabel,
                     color: contentColor,
+                    labelAlignment: _ControlLabelAlignment.motionContextMenu,
                   ),
                 ],
               ),
@@ -11561,8 +12218,9 @@ class _HistoryScopePillButton extends StatelessWidget {
               ),
               const SizedBox(width: 5),
               Flexible(
-                child: Text(
+                child: _ButtonLabel(
                   label,
+                  alignment: _ControlLabelAlignment.buttonCentered,
                   maxLines: 1,
                   overflow: TextOverflow.ellipsis,
                   style: Theme.of(context).textTheme.labelMedium?.copyWith(
@@ -11826,8 +12484,9 @@ class _ConnectedButtonGroupItem extends StatelessWidget {
                 fontWeight: segment.selected ? FontWeight.w700 : null,
               ) ??
               TextStyle(color: foregroundColor),
-          child: Text(
+          child: _ButtonLabel(
             segment.label,
+            alignment: _ControlLabelAlignment.buttonCentered,
             maxLines: 1,
             overflow: TextOverflow.ellipsis,
           ),
@@ -12213,6 +12872,8 @@ class _ClipboardTileState extends State<_ClipboardTile> {
                                 iconColorOverride: colorScheme.primary,
                                 borderColorOverride: colorScheme.primary
                                     .withValues(alpha: 0.18),
+                                labelAlignment:
+                                    _ControlLabelAlignment.badgeClipboardTime,
                               ),
                               if (widget.entry.pinned) ...[
                                 const SizedBox(width: 6),
@@ -12615,7 +13276,9 @@ class _DetailPanel extends StatelessWidget {
                               label: l10n.copy,
                               successLabel: l10n.copied,
                               variant: _MotionFeedbackButtonVariant.filledTonal,
-                              labelYOffset: compact ? 1 : -1,
+                              labelAlignment: compact
+                                  ? _ControlLabelAlignment.motionDetailCompact
+                                  : _ControlLabelAlignment.motionRaised,
                             ),
                           ),
                           if (entry.kind == ClipboardKind.url)
@@ -12754,7 +13417,7 @@ class _DetailPanel extends StatelessWidget {
                                     onPressed: onEditTags,
                                     style: detailIconButtonStyle,
                                     icon: Transform.translate(
-                                      offset: Offset(compact ? 0.75 : 0, 0),
+                                      offset: const Offset(0.75, 0),
                                       child: const Icon(Icons.sell_outlined),
                                     ),
                                   )
@@ -12772,12 +13435,12 @@ class _DetailPanel extends StatelessWidget {
                               onPressed: onDelete,
                               style: deleteActionButtonStyle,
                               icon: const Icon(Icons.delete_outline),
-                              label: compact
-                                  ? Transform.translate(
-                                      offset: const Offset(0, 1),
-                                      child: _ButtonLabel(l10n.delete),
-                                    )
-                                  : _ButtonLabel(l10n.delete),
+                              label: _ButtonLabel(
+                                l10n.delete,
+                                alignment: compact
+                                    ? _ControlLabelAlignment.buttonPlatform
+                                    : _ControlLabelAlignment.buttonStandard,
+                              ),
                             ),
                           ),
                           const SizedBox(width: 8),
@@ -12834,7 +13497,14 @@ class _CopiedAtLabel extends StatelessWidget {
           const SizedBox(width: 7),
           Flexible(
             child: Transform.translate(
-              offset: Offset(0, compact ? 0 : -1),
+              offset: Offset(
+                0,
+                _controlLabelDy(
+                  compact
+                      ? _ControlLabelAlignment.buttonPlatform
+                      : _ControlLabelAlignment.buttonStandard,
+                ),
+              ),
               child: Text(
                 _copyTimeLabel(value),
                 maxLines: 1,
@@ -13565,8 +14235,9 @@ class _TagGroupButton extends StatelessWidget {
                 Icon(icon, size: 17, color: iconColor),
                 const SizedBox(width: 6),
                 Flexible(
-                  child: Text(
+                  child: _ButtonLabel(
                     label,
+                    alignment: _ControlLabelAlignment.buttonCentered,
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
                     style: Theme.of(context).textTheme.labelLarge?.copyWith(
@@ -13901,7 +14572,10 @@ class _AddPeerDialogState extends State<_AddPeerDialog> {
                       OutlinedButton.icon(
                         onPressed: _scanQrPayload,
                         icon: const Icon(Icons.qr_code_scanner),
-                        label: _OffsetButtonLabel(l10n.scanQr, y: 1),
+                        label: _ButtonLabel(
+                          l10n.scanQr,
+                          alignment: _ControlLabelAlignment.buttonCentered,
+                        ),
                       ),
                   ],
                 ),
@@ -14032,7 +14706,10 @@ class _ConfirmDiscoveredPeerDialogState
               OutlinedButton.icon(
                 onPressed: _scanQr,
                 icon: const Icon(Icons.qr_code_scanner),
-                label: _OffsetButtonLabel(l10n.scanQrInstead, y: 1),
+                label: _ButtonLabel(
+                  l10n.scanQrInstead,
+                  alignment: _ControlLabelAlignment.buttonCentered,
+                ),
               ),
             ],
           ],
@@ -14045,7 +14722,10 @@ class _ConfirmDiscoveredPeerDialogState
         ),
         FilledButton(
           onPressed: _submitCode,
-          child: _OffsetButtonLabel(l10n.connect, y: 1),
+          child: _ButtonLabel(
+            l10n.connect,
+            alignment: _ControlLabelAlignment.buttonCentered,
+          ),
         ),
       ],
     );
@@ -14253,10 +14933,11 @@ class _FileTransferPage extends StatelessWidget {
           if (peers.length > 1)
             TextButton(
               onPressed: onToggleAllPeers,
-              child: Text(
+              child: _ButtonLabel(
                 selectedPeerIds.containsAll(peers.map((peer) => peer.id))
                     ? l10n.deselect
                     : l10n.allItems,
+                alignment: _ControlLabelAlignment.buttonCentered,
               ),
             ),
         ],
@@ -14290,11 +14971,17 @@ class _FileTransferPage extends StatelessWidget {
                   ? onSendSelected
                   : null,
               icon: const Icon(Icons.send),
-              label: Text(
-                selectedOnlinePeers.length <= 1
-                    ? l10n.send
-                    : '${l10n.sendTo} ${_localizedDeviceCount(l10n, selectedOnlinePeers.length)}',
-              ),
+              label: Platform.isWindows
+                  ? _ButtonLabel(
+                      selectedOnlinePeers.length <= 1
+                          ? l10n.send
+                          : '${l10n.sendTo} ${_localizedDeviceCount(l10n, selectedOnlinePeers.length)}',
+                    )
+                  : Text(
+                      selectedOnlinePeers.length <= 1
+                          ? l10n.send
+                          : '${l10n.sendTo} ${_localizedDeviceCount(l10n, selectedOnlinePeers.length)}',
+                    ),
             ),
           ),
         ],
@@ -14415,13 +15102,17 @@ class _SectionSurface extends StatelessWidget {
           children: [
             Row(
               children: [
-                Text(
-                  title,
-                  style: Theme.of(context).textTheme.titleMedium?.copyWith(
-                    fontWeight: FontWeight.w800,
+                Expanded(
+                  child: Text(
+                    title,
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: Theme.of(context).textTheme.titleMedium?.copyWith(
+                      fontWeight: FontWeight.w800,
+                    ),
                   ),
                 ),
-                const Spacer(),
+                if (trailing != null) const SizedBox(width: 8),
                 ?trailing,
               ],
             ),
@@ -14572,8 +15263,9 @@ class _FileTransferStatusButton extends StatelessWidget {
               children: [
                 Icon(icon, size: 16, color: foreground),
                 const SizedBox(width: 6),
-                Text(
+                _ButtonLabel(
                   label,
+                  alignment: _ControlLabelAlignment.buttonCentered,
                   style: Theme.of(context).textTheme.labelMedium?.copyWith(
                     color: foreground,
                     fontWeight: FontWeight.w600,
@@ -14667,7 +15359,10 @@ class _FileTransferDropZone extends StatelessWidget {
                 OutlinedButton.icon(
                   onPressed: onPickFiles,
                   icon: const Icon(Icons.attach_file, size: 18),
-                  label: _OffsetButtonLabel(l10n.chooseFile, y: 1),
+                  label: _ButtonLabel(
+                    l10n.chooseFile,
+                    alignment: _ControlLabelAlignment.buttonPlatform,
+                  ),
                   style: pickButtonStyle,
                 ),
               ],
@@ -14699,7 +15394,10 @@ class _FileTransferDropZone extends StatelessWidget {
                 OutlinedButton.icon(
                   onPressed: onPickFiles,
                   icon: const Icon(Icons.attach_file),
-                  label: _OffsetButtonLabel(l10n.chooseFile, y: 1),
+                  label: _ButtonLabel(
+                    l10n.chooseFile,
+                    alignment: _ControlLabelAlignment.buttonPlatform,
+                  ),
                   style: pickButtonStyle,
                 ),
                 if (!Platform.isAndroid)
@@ -14816,7 +15514,10 @@ class _SelectedTransferFilesInlineListState
             TextButton.icon(
               onPressed: widget.onClear,
               icon: const Icon(Icons.clear_all),
-              label: Text(l10n.clearList),
+              label: _ButtonLabel(
+                l10n.clearList,
+                alignment: _ControlLabelAlignment.buttonCentered,
+              ),
             ),
           ],
         ),
@@ -15080,6 +15781,9 @@ class _DevicesPage extends StatelessWidget {
     required this.syncHost,
     required this.syncPort,
     required this.syncError,
+    required this.diagnostics,
+    required this.diagnosticEvents,
+    required this.peerLatenciesMs,
     required this.onAddPeer,
     required this.onScanPairQr,
     required this.onCopyPairPayload,
@@ -15089,6 +15793,8 @@ class _DevicesPage extends StatelessWidget {
     required this.onTestPeer,
     required this.onRenamePeer,
     required this.onRemovePeer,
+    required this.onRefreshDiagnostics,
+    required this.onExportDiagnostics,
   });
 
   final List<SyncPeer> peers;
@@ -15098,6 +15804,9 @@ class _DevicesPage extends StatelessWidget {
   final String syncHost;
   final int syncPort;
   final String? syncError;
+  final _LanDiagnosticSnapshot diagnostics;
+  final List<_LanDiagnosticEvent> diagnosticEvents;
+  final Map<String, int> peerLatenciesMs;
   final VoidCallback onAddPeer;
   final VoidCallback? onScanPairQr;
   final VoidCallback onCopyPairPayload;
@@ -15107,6 +15816,8 @@ class _DevicesPage extends StatelessWidget {
   final ValueChanged<SyncPeer> onTestPeer;
   final ValueChanged<SyncPeer> onRenamePeer;
   final ValueChanged<SyncPeer> onRemovePeer;
+  final VoidCallback onRefreshDiagnostics;
+  final VoidCallback onExportDiagnostics;
 
   @override
   Widget build(BuildContext context) {
@@ -15167,6 +15878,16 @@ class _DevicesPage extends StatelessWidget {
                     onRemovePeer: onRemovePeer,
                     onAddPeer: onAddPeer,
                   ),
+                  const SizedBox(height: 16),
+                  _LanDiagnosticsCard(
+                    snapshot: diagnostics,
+                    peers: peers,
+                    discoveredById: discoveredById,
+                    events: diagnosticEvents,
+                    peerLatenciesMs: peerLatenciesMs,
+                    onRefresh: onRefreshDiagnostics,
+                    onExport: onExportDiagnostics,
+                  ),
                 ],
               );
 
@@ -15217,13 +15938,19 @@ class _PairingActionsCard extends StatelessWidget {
           FilledButton.tonalIcon(
             onPressed: onAddPeer,
             icon: const Icon(Icons.keyboard_alt_outlined),
-            label: _ButtonLabel(l10n.enterPayload),
+            label: _ButtonLabel(
+              l10n.enterPayload,
+              alignment: _ControlLabelAlignment.buttonWindowsRaised,
+            ),
           )
         else
           FilledButton.tonalIcon(
             onPressed: scanQr,
             icon: const Icon(Icons.qr_code_scanner),
-            label: _OffsetButtonLabel(l10n.scanQr, y: 1),
+            label: _ButtonLabel(
+              l10n.scanQr,
+              alignment: _ControlLabelAlignment.buttonCentered,
+            ),
           ),
       ],
     );
@@ -15290,7 +16017,7 @@ class _TrustedDevicesCard extends StatelessWidget {
       subtitle: '',
       trailing: _MiniChip(
         label: _localizedDeviceCount(l10n, peers.length),
-        labelYOffset: 0,
+        labelAlignment: _ControlLabelAlignment.badgePairedDevices,
       ),
       child: peers.isEmpty
           ? Container(
@@ -15348,6 +16075,432 @@ class _TrustedDevicesCard extends StatelessWidget {
             ),
     );
   }
+}
+
+class _LanDiagnosticsCard extends StatelessWidget {
+  const _LanDiagnosticsCard({
+    required this.snapshot,
+    required this.peers,
+    required this.discoveredById,
+    required this.events,
+    required this.peerLatenciesMs,
+    required this.onRefresh,
+    required this.onExport,
+  });
+
+  final _LanDiagnosticSnapshot snapshot;
+  final List<SyncPeer> peers;
+  final Map<String, DiscoveredSyncDevice> discoveredById;
+  final List<_LanDiagnosticEvent> events;
+  final Map<String, int> peerLatenciesMs;
+  final VoidCallback onRefresh;
+  final VoidCallback onExport;
+
+  @override
+  Widget build(BuildContext context) {
+    final colorScheme = Theme.of(context).colorScheme;
+    final textTheme = Theme.of(context).textTheme;
+    final l10n = context.l10n;
+    final now = DateTime.now();
+    final recentEvents = events.take(6).toList();
+
+    Color eventColor(_LanDiagnosticLevel level) => switch (level) {
+      _LanDiagnosticLevel.success => const Color(0xFF2E7D32),
+      _LanDiagnosticLevel.warning => colorScheme.tertiary,
+      _LanDiagnosticLevel.error => colorScheme.error,
+      _LanDiagnosticLevel.info => colorScheme.primary,
+    };
+
+    return Card.filled(
+      margin: EdgeInsets.zero,
+      color: colorScheme.surfaceContainerLow,
+      clipBehavior: Clip.antiAlias,
+      child: ExpansionTile(
+        key: const PageStorageKey<String>('lan-diagnostics-expansion'),
+        initiallyExpanded: false,
+        leading: Icon(Icons.monitor_heart_outlined, color: colorScheme.primary),
+        title: Text(
+          l10n.lanDiagnostics,
+          style: textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w800),
+        ),
+        subtitle: Text(
+          l10n.lanDiagnosticsSubtitle,
+          maxLines: 2,
+          overflow: TextOverflow.ellipsis,
+        ),
+        childrenPadding: EdgeInsets.zero,
+        children: [
+          _BoundedMobileDiagnostics(
+            child: Column(
+              children: [
+                Row(
+                  children: [
+                    Expanded(
+                      child: Text(
+                        '${snapshot.onlineCount}/${snapshot.pairedCount} ${l10n.online.toLowerCase()}',
+                        style: textTheme.labelLarge?.copyWith(
+                          color: colorScheme.onSurfaceVariant,
+                        ),
+                      ),
+                    ),
+                    IconButton.filledTonal(
+                      tooltip: l10n.refreshDiagnostics,
+                      onPressed: onRefresh,
+                      icon: const Icon(Icons.refresh),
+                    ),
+                    const SizedBox(width: 8),
+                    IconButton.outlined(
+                      tooltip: l10n.exportLog,
+                      onPressed: onExport,
+                      icon: const Icon(Icons.file_download_outlined),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 12),
+                Align(
+                  alignment: Alignment.centerLeft,
+                  child: Text(
+                    l10n.localServices,
+                    style: textTheme.labelLarge?.copyWith(
+                      fontWeight: FontWeight.w800,
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 8),
+                LayoutBuilder(
+                  builder: (context, constraints) {
+                    final itemWidth = constraints.maxWidth < 360
+                        ? constraints.maxWidth
+                        : (constraints.maxWidth - 8) / 2;
+                    return Wrap(
+                      spacing: 8,
+                      runSpacing: 8,
+                      children: [
+                        _LanDiagnosticMetric(
+                          width: itemWidth,
+                          icon: Icons.sync_alt,
+                          label: l10n.syncServer,
+                          value: snapshot.syncServerActive
+                              ? l10n.running
+                              : l10n.stopped,
+                          healthy: snapshot.syncServerActive,
+                        ),
+                        _LanDiagnosticMetric(
+                          width: itemWidth,
+                          icon: Icons.swap_vert_circle_outlined,
+                          label: l10n.fileServer,
+                          value: snapshot.fileServerActive
+                              ? l10n.running
+                              : l10n.stopped,
+                          healthy: snapshot.fileServerActive,
+                        ),
+                        _LanDiagnosticMetric(
+                          width: itemWidth,
+                          icon: Icons.radar_outlined,
+                          label: l10n.lanDiscovery,
+                          value: snapshot.discoveryActive
+                              ? l10n.running
+                              : l10n.stopped,
+                          healthy: snapshot.discoveryActive,
+                        ),
+                        _LanDiagnosticMetric(
+                          width: itemWidth,
+                          icon: Icons.schedule_outlined,
+                          label: l10n.beaconInterval,
+                          value: '${snapshot.beaconInterval.inSeconds}s',
+                          healthy: snapshot.discoveryActive,
+                        ),
+                        _LanDiagnosticMetric(
+                          width: itemWidth,
+                          icon: Icons.layers_outlined,
+                          label: snapshot.appInForeground
+                              ? l10n.foreground
+                              : l10n.background,
+                          value: snapshot.localEndpoint,
+                          healthy: snapshot.lanEnabled,
+                        ),
+                        _LanDiagnosticMetric(
+                          width: itemWidth,
+                          icon: snapshot.screenAwake
+                              ? Icons.light_mode_outlined
+                              : Icons.bedtime_outlined,
+                          label: snapshot.screenAwake
+                              ? l10n.screenAwake
+                              : l10n.screenSleeping,
+                          value:
+                              '${snapshot.onlineCount}/${snapshot.pairedCount} ${l10n.online.toLowerCase()}',
+                          healthy: snapshot.screenAwake,
+                        ),
+                      ],
+                    );
+                  },
+                ),
+                const SizedBox(height: 16),
+                Align(
+                  alignment: Alignment.centerLeft,
+                  child: Text(
+                    l10n.connectionDetails,
+                    style: textTheme.labelLarge?.copyWith(
+                      fontWeight: FontWeight.w800,
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 8),
+                if (peers.isEmpty)
+                  Align(
+                    alignment: Alignment.centerLeft,
+                    child: Text(
+                      l10n.noPairedDevices,
+                      style: textTheme.bodySmall?.copyWith(
+                        color: colorScheme.onSurfaceVariant,
+                      ),
+                    ),
+                  )
+                else
+                  for (final peer in peers) ...[
+                    _LanDiagnosticPeerRow(
+                      peer: peer,
+                      discovered: discoveredById[peer.id],
+                      latencyMs: peerLatenciesMs[peer.id],
+                      now: now,
+                    ),
+                    if (peer != peers.last) const SizedBox(height: 6),
+                  ],
+                const SizedBox(height: 16),
+                Align(
+                  alignment: Alignment.centerLeft,
+                  child: Text(
+                    l10n.recentEvents,
+                    style: textTheme.labelLarge?.copyWith(
+                      fontWeight: FontWeight.w800,
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 8),
+                if (recentEvents.isEmpty)
+                  Align(
+                    alignment: Alignment.centerLeft,
+                    child: Text(
+                      l10n.noDiagnosticEvents,
+                      style: textTheme.bodySmall?.copyWith(
+                        color: colorScheme.onSurfaceVariant,
+                      ),
+                    ),
+                  )
+                else
+                  for (final event in recentEvents) ...[
+                    Row(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Padding(
+                          padding: const EdgeInsets.only(top: 6),
+                          child: Container(
+                            width: 6,
+                            height: 6,
+                            decoration: BoxDecoration(
+                              color: eventColor(event.level),
+                              shape: BoxShape.circle,
+                            ),
+                          ),
+                        ),
+                        const SizedBox(width: 8),
+                        Expanded(
+                          child: Text(
+                            '${_diagnosticClock(event.at)}  ${event.message}',
+                            style: textTheme.bodySmall?.copyWith(
+                              color: colorScheme.onSurfaceVariant,
+                            ),
+                          ),
+                        ),
+                      ],
+                    ),
+                    if (event != recentEvents.last) const SizedBox(height: 6),
+                  ],
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _BoundedMobileDiagnostics extends StatelessWidget {
+  const _BoundedMobileDiagnostics({required this.child});
+
+  final Widget child;
+
+  @override
+  Widget build(BuildContext context) {
+    final padding = const EdgeInsets.fromLTRB(16, 0, 16, 16);
+    final content = Padding(padding: padding, child: child);
+    if (MediaQuery.sizeOf(context).width >= _mobileLayoutBreakpoint) {
+      return content;
+    }
+    final maxHeight = math.min(MediaQuery.sizeOf(context).height * 0.62, 560.0);
+    return ConstrainedBox(
+      constraints: BoxConstraints(maxHeight: maxHeight),
+      child: Scrollbar(
+        child: SingleChildScrollView(
+          key: const PageStorageKey<String>('lan-diagnostics-details-scroll'),
+          primary: false,
+          physics: const ClampingScrollPhysics(),
+          child: content,
+        ),
+      ),
+    );
+  }
+}
+
+class _LanDiagnosticMetric extends StatelessWidget {
+  const _LanDiagnosticMetric({
+    required this.width,
+    required this.icon,
+    required this.label,
+    required this.value,
+    required this.healthy,
+  });
+
+  final double width;
+  final IconData icon;
+  final String label;
+  final String value;
+  final bool healthy;
+
+  @override
+  Widget build(BuildContext context) {
+    final colorScheme = Theme.of(context).colorScheme;
+    final accent = healthy ? colorScheme.primary : colorScheme.error;
+    return Container(
+      width: width,
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 9),
+      decoration: ShapeDecoration(
+        color: colorScheme.surfaceContainer,
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(10),
+          side: BorderSide(color: colorScheme.outlineVariant),
+        ),
+      ),
+      child: Row(
+        children: [
+          Icon(icon, size: 18, color: accent),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  label,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: Theme.of(context).textTheme.labelMedium,
+                ),
+                Text(
+                  value,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                    color: colorScheme.onSurfaceVariant,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _LanDiagnosticPeerRow extends StatelessWidget {
+  const _LanDiagnosticPeerRow({
+    required this.peer,
+    required this.discovered,
+    required this.latencyMs,
+    required this.now,
+  });
+
+  final SyncPeer peer;
+  final DiscoveredSyncDevice? discovered;
+  final int? latencyMs;
+  final DateTime now;
+
+  @override
+  Widget build(BuildContext context) {
+    final colorScheme = Theme.of(context).colorScheme;
+    final l10n = context.l10n;
+    final device = discovered;
+    final online =
+        device != null &&
+        device.available &&
+        now.difference(device.lastSeenAt) <= device.onlineWindow;
+    final reason = device == null
+        ? l10n.beaconNeverSeen
+        : !device.available
+        ? l10n.remoteSleeping
+        : online
+        ? '${l10n.beaconReceived} - ${_relativeTime(device.lastSeenAt, l10n)}'
+        : '${l10n.beaconExpired} - ${_relativeTime(device.lastSeenAt, l10n)}';
+    final statusColor = online
+        ? const Color(0xFF2E7D32)
+        : device?.available == false
+        ? colorScheme.tertiary
+        : colorScheme.error;
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 9),
+      decoration: ShapeDecoration(
+        color: colorScheme.surfaceContainer,
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(10),
+          side: BorderSide(color: colorScheme.outlineVariant),
+        ),
+      ),
+      child: Row(
+        children: [
+          Icon(
+            online ? Icons.wifi_tethering : Icons.wifi_off_outlined,
+            size: 19,
+            color: statusColor,
+          ),
+          const SizedBox(width: 9),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  peer.name,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: Theme.of(context).textTheme.labelLarge,
+                ),
+                Text(
+                  '${device?.endpoint ?? peer.endpoint} - $reason',
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                  style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                    color: colorScheme.onSurfaceVariant,
+                  ),
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(width: 8),
+          Text(
+            latencyMs == null ? l10n.notMeasured : '$latencyMs ms',
+            style: Theme.of(context).textTheme.labelSmall?.copyWith(
+              color: colorScheme.onSurfaceVariant,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+String _diagnosticClock(DateTime value) {
+  final local = value.toLocal();
+  return '${local.hour.toString().padLeft(2, '0')}:${local.minute.toString().padLeft(2, '0')}:${local.second.toString().padLeft(2, '0')}';
 }
 
 class _SettingsPageSlideSwitcher extends StatefulWidget {
@@ -15639,6 +16792,7 @@ class _UpdateSettingsPage extends StatelessWidget {
     required this.onToggleAutoCheck,
     required this.onOpenLandingPage,
     required this.onOpenGithub,
+    required this.onExportCrashReport,
   });
 
   final String currentVersion;
@@ -15650,6 +16804,7 @@ class _UpdateSettingsPage extends StatelessWidget {
   final ValueChanged<bool> onToggleAutoCheck;
   final VoidCallback onOpenLandingPage;
   final VoidCallback onOpenGithub;
+  final VoidCallback onExportCrashReport;
 
   @override
   Widget build(BuildContext context) {
@@ -15682,7 +16837,7 @@ class _UpdateSettingsPage extends StatelessWidget {
         LayoutBuilder(
           builder: (context, constraints) {
             final wide = constraints.maxWidth >= 840;
-            final mobileIntro = Card.filled(
+            final updateIntro = Card.filled(
               margin: EdgeInsets.zero,
               color: colorScheme.surfaceContainerLow,
               child: Padding(
@@ -15727,43 +16882,7 @@ class _UpdateSettingsPage extends StatelessWidget {
                 ),
               ),
             );
-            final desktopIntro = _SettingsCard(
-              icon: Icons.info_outline,
-              title: l10n.currentVersion,
-              subtitle: '',
-              trailing: FilledButton.tonalIcon(
-                onPressed: checking ? null : onCheckNow,
-                icon: _DirectorySyncIcon(checking: checking),
-                label: _ButtonLabel(checking ? l10n.checking : l10n.check),
-              ),
-              child: Row(
-                children: [
-                  const _OpenCbLogoMark(size: 44),
-                  const SizedBox(width: 12),
-                  Expanded(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text(
-                          'OpenCB $currentVersion',
-                          style: Theme.of(context).textTheme.titleMedium
-                              ?.copyWith(fontWeight: FontWeight.w800),
-                        ),
-                        if (latestMessage != null) ...[
-                          const SizedBox(height: 4),
-                          Text(
-                            latestMessage!,
-                            style: Theme.of(context).textTheme.bodySmall
-                                ?.copyWith(color: colorScheme.onSurfaceVariant),
-                          ),
-                        ],
-                      ],
-                    ),
-                  ),
-                ],
-              ),
-            );
-            final mobileUpdateControls = Column(
+            final updateControls = Column(
               children: [
                 _UpdateSettingsSimpleRow(
                   title: l10n.autoCheckUpdates,
@@ -15777,6 +16896,11 @@ class _UpdateSettingsPage extends StatelessWidget {
                 ),
                 const SizedBox(height: 8),
                 _UpdateSettingsSimpleRow(
+                  title: l10n.exportCrashReport,
+                  onTap: onExportCrashReport,
+                ),
+                const SizedBox(height: 8),
+                _UpdateSettingsSimpleRow(
                   title: l10n.landingPage,
                   onTap: onOpenLandingPage,
                 ),
@@ -15784,62 +16908,21 @@ class _UpdateSettingsPage extends StatelessWidget {
                 _UpdateSettingsSimpleRow(title: 'GitHub', onTap: onOpenGithub),
               ],
             );
-            final desktopUpdateControls = _SettingsCard(
-              icon: Icons.system_update_alt,
-              title: l10n.checkUpdates,
-              subtitle: '',
-              child: Column(
-                children: [
-                  _SettingsSwitchRow(
-                    icon: Icons.notifications_active_outlined,
-                    title: l10n.autoCheckUpdates,
-                    subtitle: autoCheckUpdates
-                        ? l10n.autoCheckUpdatesEnabled
-                        : l10n.autoCheckUpdatesDisabled,
-                    value: autoCheckUpdates,
-                    onChanged: onToggleAutoCheck,
-                  ),
-                  const SizedBox(height: 8),
-                  _SettingsNavigationRow(
-                    icon: Icons.public,
-                    title: l10n.landingPage,
-                    subtitle: _landingPageUrl,
-                    onTap: onOpenLandingPage,
-                  ),
-                  const SizedBox(height: 8),
-                  _SettingsNavigationRow(
-                    icon: Icons.code,
-                    title: 'GitHub',
-                    subtitle: _githubRepoUrl,
-                    onTap: onOpenGithub,
-                  ),
-                ],
-              ),
-            );
-            if (mobile) {
-              return Column(
-                children: [
-                  mobileIntro,
-                  const SizedBox(height: 16),
-                  mobileUpdateControls,
-                ],
-              );
-            }
             if (!wide) {
               return Column(
                 children: [
-                  desktopIntro,
+                  updateIntro,
                   const SizedBox(height: 16),
-                  desktopUpdateControls,
+                  updateControls,
                 ],
               );
             }
             return Row(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Expanded(flex: 5, child: desktopIntro),
+                Expanded(flex: 5, child: updateIntro),
                 const SizedBox(width: 16),
-                Expanded(flex: 6, child: desktopUpdateControls),
+                Expanded(flex: 6, child: updateControls),
               ],
             );
           },
@@ -16464,7 +17547,10 @@ class _ClipboardSettingsPanelState extends State<_ClipboardSettingsPanel> {
               child: OutlinedButton.icon(
                 onPressed: widget.onOpenAndroidNotificationSettings,
                 icon: const Icon(Icons.notifications_outlined),
-                label: _OffsetButtonLabel(l10n.notificationSettings, y: 1),
+                label: _ButtonLabel(
+                  l10n.notificationSettings,
+                  alignment: _ControlLabelAlignment.buttonCentered,
+                ),
               ),
             ),
           ],
@@ -16513,7 +17599,7 @@ class _ClipboardSettingsPanelState extends State<_ClipboardSettingsPanel> {
           subtitle: '',
           trailing: _MiniChip(
             label: _formatClipboardCount(_pendingRetentionLimit, l10n),
-            labelYOffset: 1,
+            labelAlignment: _ControlLabelAlignment.badgeStorage,
           ),
           child: _RetentionStandardSlider(
             value: retentionValue,
@@ -17001,34 +18087,79 @@ class _ThemeSwatch extends StatelessWidget {
   }
 }
 
+enum _ControlLabelAlignment {
+  buttonStandard,
+  buttonCentered,
+  buttonPlatform,
+  buttonWindowsRaised,
+  motionCentered,
+  motionRaised,
+  motionPayload,
+  motionDetailCompact,
+  motionContextMenu,
+  badgeDefault,
+  badgeCentered,
+  badgeClipboardTime,
+  badgePairedDevices,
+  badgeStorage,
+}
+
+double _controlLabelDy(
+  _ControlLabelAlignment alignment, {
+  bool tightText = false,
+}) {
+  return switch (alignment) {
+    _ControlLabelAlignment.buttonStandard => -1,
+    _ControlLabelAlignment.buttonCentered => 0,
+    _ControlLabelAlignment.buttonPlatform => Platform.isWindows ? -1 : 0,
+    _ControlLabelAlignment.buttonWindowsRaised => Platform.isWindows ? -2 : -1,
+    _ControlLabelAlignment.motionCentered => 0,
+    _ControlLabelAlignment.motionRaised => -1,
+    _ControlLabelAlignment.motionPayload => Platform.isWindows ? -2 : 0,
+    _ControlLabelAlignment.motionDetailCompact => Platform.isWindows ? -1 : 1,
+    _ControlLabelAlignment.motionContextMenu => Platform.isWindows ? -1 : 0,
+    _ControlLabelAlignment.badgeDefault => tightText ? 0 : -0.75,
+    _ControlLabelAlignment.badgeCentered => 0,
+    _ControlLabelAlignment.badgeClipboardTime => Platform.isAndroid ? 1 : 0,
+    _ControlLabelAlignment.badgePairedDevices =>
+      Platform.isWindows
+          ? -1
+          : Platform.isAndroid
+          ? 1
+          : 0,
+    _ControlLabelAlignment.badgeStorage => Platform.isWindows ? -1 : 0,
+  };
+}
+
 class _ButtonLabel extends StatelessWidget {
-  const _ButtonLabel(this.text);
+  const _ButtonLabel(
+    this.text, {
+    this.alignment = _ControlLabelAlignment.buttonStandard,
+    this.style,
+    this.maxLines,
+    this.overflow,
+  });
 
   final String text;
+  final _ControlLabelAlignment alignment;
+  final TextStyle? style;
+  final int? maxLines;
+  final TextOverflow? overflow;
 
   @override
   Widget build(BuildContext context) {
     return Transform.translate(
-      offset: const Offset(0, -1),
+      offset: Offset(0, _controlLabelDy(alignment)),
       child: Text(
         text,
+        style: style,
+        maxLines: maxLines,
+        overflow: overflow,
         textHeightBehavior: const TextHeightBehavior(
           leadingDistribution: TextLeadingDistribution.even,
         ),
       ),
     );
-  }
-}
-
-class _OffsetButtonLabel extends StatelessWidget {
-  const _OffsetButtonLabel(this.text, {required this.y});
-
-  final String text;
-  final double y;
-
-  @override
-  Widget build(BuildContext context) {
-    return Transform.translate(offset: Offset(0, y), child: _ButtonLabel(text));
   }
 }
 
@@ -17041,7 +18172,7 @@ class _FittedOneLineLabel extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Transform.translate(
-      offset: const Offset(0, -1),
+      offset: Offset(0, _controlLabelDy(_ControlLabelAlignment.buttonStandard)),
       child: SizedBox(
         width: minWidth,
         height: 16,
@@ -17072,7 +18203,7 @@ class _AnimatedFeedbackLabel extends StatelessWidget {
     required this.label,
     required this.successLabel,
     this.color,
-    this.labelYOffset = 0,
+    this.labelAlignment = _ControlLabelAlignment.motionCentered,
   });
 
   final bool showFeedback;
@@ -17080,7 +18211,7 @@ class _AnimatedFeedbackLabel extends StatelessWidget {
   final String label;
   final String successLabel;
   final Color? color;
-  final double labelYOffset;
+  final _ControlLabelAlignment labelAlignment;
 
   @override
   Widget build(BuildContext context) {
@@ -17124,7 +18255,7 @@ class _AnimatedFeedbackLabel extends StatelessWidget {
         icon: showFeedback ? Icons.check_circle_outline : icon,
         label: showFeedback ? successLabel : label,
         color: color,
-        labelYOffset: labelYOffset,
+        labelAlignment: labelAlignment,
       ),
     );
   }
@@ -17136,13 +18267,13 @@ class _FeedbackLabelRow extends StatelessWidget {
     required this.icon,
     required this.label,
     this.color,
-    this.labelYOffset = 0,
+    this.labelAlignment = _ControlLabelAlignment.motionCentered,
   });
 
   final IconData icon;
   final String label;
   final Color? color;
-  final double labelYOffset;
+  final _ControlLabelAlignment labelAlignment;
 
   @override
   Widget build(BuildContext context) {
@@ -17158,7 +18289,7 @@ class _FeedbackLabelRow extends StatelessWidget {
         Icon(icon, size: 18, color: color),
         const SizedBox(width: 8),
         Transform.translate(
-          offset: Offset(0, labelYOffset),
+          offset: Offset(0, _controlLabelDy(labelAlignment)),
           child: Text(label, style: effectiveStyle),
         ),
       ],
@@ -17173,7 +18304,7 @@ class _MotionFeedbackButton extends StatefulWidget {
     required this.onPressed,
     this.successLabel = 'Xong',
     this.variant = _MotionFeedbackButtonVariant.outlined,
-    this.labelYOffset = 0,
+    this.labelAlignment = _ControlLabelAlignment.motionCentered,
   });
 
   final IconData icon;
@@ -17181,7 +18312,7 @@ class _MotionFeedbackButton extends StatefulWidget {
   final FutureOr<void> Function()? onPressed;
   final String successLabel;
   final _MotionFeedbackButtonVariant variant;
-  final double labelYOffset;
+  final _ControlLabelAlignment labelAlignment;
 
   @override
   State<_MotionFeedbackButton> createState() => _MotionFeedbackButtonState();
@@ -17245,7 +18376,7 @@ class _MotionFeedbackButtonState extends State<_MotionFeedbackButton> {
       icon: widget.icon,
       label: widget.label,
       successLabel: widget.successLabel,
-      labelYOffset: widget.labelYOffset,
+      labelAlignment: widget.labelAlignment,
     );
   }
 
@@ -17253,7 +18384,7 @@ class _MotionFeedbackButtonState extends State<_MotionFeedbackButton> {
     return _FeedbackLabelRow(
       icon: icon,
       label: label,
-      labelYOffset: widget.labelYOffset,
+      labelAlignment: widget.labelAlignment,
     );
   }
 
@@ -17686,7 +18817,7 @@ class _PairQrCard extends StatelessWidget {
                   label: l10n.copyPayload,
                   successLabel: l10n.copied,
                   variant: _MotionFeedbackButtonVariant.filledTonal,
-                  labelYOffset: 1,
+                  labelAlignment: _ControlLabelAlignment.motionPayload,
                 ),
               ],
             ),
@@ -17776,7 +18907,7 @@ class _DiscoveredDevicesCard extends StatelessWidget {
       subtitle: '',
       trailing: _MiniChip(
         label: '${devices.length} ${l10n.found}',
-        labelYOffset: 0,
+        labelAlignment: _ControlLabelAlignment.badgeCentered,
       ),
       child: Column(
         children: [
@@ -17842,7 +18973,10 @@ class _DiscoveredDeviceRow extends StatelessWidget {
             final addButton = FilledButton.tonalIcon(
               onPressed: onAdd,
               icon: const Icon(Icons.add_link),
-              label: _OffsetButtonLabel(l10n.connect, y: 1),
+              label: _ButtonLabel(
+                l10n.connect,
+                alignment: _ControlLabelAlignment.buttonCentered,
+              ),
             );
             if (compact) {
               return Column(
@@ -17889,19 +19023,21 @@ class _DeviceRow extends StatelessWidget {
   Widget build(BuildContext context) {
     final colorScheme = Theme.of(context).colorScheme;
     final l10n = context.l10n;
-    final hasError = peer.lastError != null;
-    final peerErrorText = peer.lastError == null
-        ? null
-        : _friendlySyncError(peer.lastError!);
     final lastSeenAge = discoveredDevice == null
         ? null
         : DateTime.now().difference(discoveredDevice!.lastSeenAt);
     final online =
-        lastSeenAge != null && lastSeenAge <= _discoveredDeviceOnlineWindow;
+        discoveredDevice != null &&
+        discoveredDevice!.available &&
+        lastSeenAge != null &&
+        lastSeenAge <= discoveredDevice!.onlineWindow;
     final recentlySeen =
         !online &&
+        (discoveredDevice?.available ?? false) &&
         lastSeenAge != null &&
         lastSeenAge <= _discoveredDeviceCacheWindow;
+    final hasError = online && peer.lastError != null;
+    final peerErrorText = hasError ? _friendlySyncError(peer.lastError!) : null;
     Widget deviceActionButton({
       required String tooltip,
       required VoidCallback onPressed,
@@ -17972,7 +19108,7 @@ class _DeviceRow extends StatelessWidget {
       ),
       contentColorOverride: statusBaseColor,
       borderColorOverride: statusBaseColor.withValues(alpha: 0.18),
-      labelYOffset: 0,
+      labelAlignment: _ControlLabelAlignment.badgeCentered,
     );
     return Container(
       width: double.infinity,
@@ -18168,7 +19304,7 @@ class _M3Badge extends StatelessWidget {
     this.borderColorOverride,
     this.horizontalPadding,
     this.tightText = false,
-    this.labelYOffset,
+    this.labelAlignment = _ControlLabelAlignment.badgeDefault,
   });
 
   final String label;
@@ -18180,7 +19316,7 @@ class _M3Badge extends StatelessWidget {
   final Color? borderColorOverride;
   final double? horizontalPadding;
   final bool tightText;
-  final double? labelYOffset;
+  final _ControlLabelAlignment labelAlignment;
 
   @override
   Widget build(BuildContext context) {
@@ -18247,7 +19383,10 @@ class _M3Badge extends StatelessWidget {
               child: ConstrainedBox(
                 constraints: const BoxConstraints(maxWidth: 150),
                 child: Transform.translate(
-                  offset: Offset(0, labelYOffset ?? (tightText ? 0 : -0.75)),
+                  offset: Offset(
+                    0,
+                    _controlLabelDy(labelAlignment, tightText: tightText),
+                  ),
                   child: Text(
                     label,
                     maxLines: 1,
@@ -18287,12 +19426,12 @@ class _MiniChip extends StatelessWidget {
   const _MiniChip({
     required this.label,
     this.timeTone = false,
-    this.labelYOffset,
+    this.labelAlignment = _ControlLabelAlignment.badgeDefault,
   });
 
   final String label;
   final bool timeTone;
-  final double? labelYOffset;
+  final _ControlLabelAlignment labelAlignment;
 
   @override
   Widget build(BuildContext context) {
@@ -18301,7 +19440,7 @@ class _MiniChip extends StatelessWidget {
       return _M3Badge(
         label: label,
         tone: _M3BadgeTone.surface,
-        labelYOffset: labelYOffset,
+        labelAlignment: labelAlignment,
       );
     }
     return _M3Badge(
@@ -18309,7 +19448,7 @@ class _MiniChip extends StatelessWidget {
       tone: _M3BadgeTone.primary,
       horizontalPadding: 8,
       tightText: true,
-      labelYOffset: labelYOffset,
+      labelAlignment: labelAlignment,
       containerColorOverride: Color.alphaBlend(
         colorScheme.primary.withValues(alpha: 0.10),
         colorScheme.surfaceContainerHigh,
@@ -18363,6 +19502,10 @@ Future<File> _fileTransfersFile() async {
 
 Future<File> _themeFile() async {
   return _opencbDataFile('theme.json');
+}
+
+Future<File> _crashReportFile() async {
+  return _opencbDataFile('crash_reports.log');
 }
 
 Future<File> _opencbDataFile(String fileName) async {

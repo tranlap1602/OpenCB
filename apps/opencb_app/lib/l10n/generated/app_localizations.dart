@@ -1819,6 +1819,168 @@ abstract class AppLocalizations {
   /// In vi, this message translates to:
   /// **'.'**
   String get bulkTaggedSuffix;
+
+  /// No description provided for @lanDiagnostics.
+  ///
+  /// In vi, this message translates to:
+  /// **'Chẩn đoán LAN'**
+  String get lanDiagnostics;
+
+  /// No description provided for @lanDiagnosticsSubtitle.
+  ///
+  /// In vi, this message translates to:
+  /// **'Trạng thái discovery, server và kết nối thiết bị'**
+  String get lanDiagnosticsSubtitle;
+
+  /// No description provided for @refreshDiagnostics.
+  ///
+  /// In vi, this message translates to:
+  /// **'Làm mới'**
+  String get refreshDiagnostics;
+
+  /// No description provided for @exportLog.
+  ///
+  /// In vi, this message translates to:
+  /// **'Xuất log'**
+  String get exportLog;
+
+  /// No description provided for @localServices.
+  ///
+  /// In vi, this message translates to:
+  /// **'Dịch vụ cục bộ'**
+  String get localServices;
+
+  /// No description provided for @syncServer.
+  ///
+  /// In vi, this message translates to:
+  /// **'Sync server'**
+  String get syncServer;
+
+  /// No description provided for @fileServer.
+  ///
+  /// In vi, this message translates to:
+  /// **'File server'**
+  String get fileServer;
+
+  /// No description provided for @lanDiscovery.
+  ///
+  /// In vi, this message translates to:
+  /// **'LAN discovery'**
+  String get lanDiscovery;
+
+  /// No description provided for @running.
+  ///
+  /// In vi, this message translates to:
+  /// **'Đang chạy'**
+  String get running;
+
+  /// No description provided for @stopped.
+  ///
+  /// In vi, this message translates to:
+  /// **'Đã dừng'**
+  String get stopped;
+
+  /// No description provided for @foreground.
+  ///
+  /// In vi, this message translates to:
+  /// **'Tiền cảnh'**
+  String get foreground;
+
+  /// No description provided for @background.
+  ///
+  /// In vi, this message translates to:
+  /// **'Chạy nền'**
+  String get background;
+
+  /// No description provided for @screenAwake.
+  ///
+  /// In vi, this message translates to:
+  /// **'Màn hình bật'**
+  String get screenAwake;
+
+  /// No description provided for @screenSleeping.
+  ///
+  /// In vi, this message translates to:
+  /// **'Màn hình tắt'**
+  String get screenSleeping;
+
+  /// No description provided for @beaconInterval.
+  ///
+  /// In vi, this message translates to:
+  /// **'Nhịp beacon'**
+  String get beaconInterval;
+
+  /// No description provided for @connectionDetails.
+  ///
+  /// In vi, this message translates to:
+  /// **'Chi tiết kết nối'**
+  String get connectionDetails;
+
+  /// No description provided for @recentEvents.
+  ///
+  /// In vi, this message translates to:
+  /// **'Sự kiện gần đây'**
+  String get recentEvents;
+
+  /// No description provided for @noDiagnosticEvents.
+  ///
+  /// In vi, this message translates to:
+  /// **'Chưa có sự kiện chẩn đoán.'**
+  String get noDiagnosticEvents;
+
+  /// No description provided for @beaconReceived.
+  ///
+  /// In vi, this message translates to:
+  /// **'Đang nhận beacon'**
+  String get beaconReceived;
+
+  /// No description provided for @remoteSleeping.
+  ///
+  /// In vi, this message translates to:
+  /// **'Thiết bị đã báo đang ngủ'**
+  String get remoteSleeping;
+
+  /// No description provided for @beaconExpired.
+  ///
+  /// In vi, this message translates to:
+  /// **'Beacon đã hết hạn'**
+  String get beaconExpired;
+
+  /// No description provided for @beaconNeverSeen.
+  ///
+  /// In vi, this message translates to:
+  /// **'Chưa nhận được beacon'**
+  String get beaconNeverSeen;
+
+  /// No description provided for @lastPing.
+  ///
+  /// In vi, this message translates to:
+  /// **'Ping gần nhất'**
+  String get lastPing;
+
+  /// No description provided for @notMeasured.
+  ///
+  /// In vi, this message translates to:
+  /// **'Chưa đo'**
+  String get notMeasured;
+
+  /// No description provided for @exportCrashReport.
+  ///
+  /// In vi, this message translates to:
+  /// **'Xuất báo cáo sự cố'**
+  String get exportCrashReport;
+
+  /// No description provided for @crashReportExportedPrefix.
+  ///
+  /// In vi, this message translates to:
+  /// **'Đã xuất báo cáo sự cố vào'**
+  String get crashReportExportedPrefix;
+
+  /// No description provided for @cannotExportCrashReport.
+  ///
+  /// In vi, this message translates to:
+  /// **'Không xuất được báo cáo sự cố.'**
+  String get cannotExportCrashReport;
 }
 
 class _AppLocalizationsDelegate

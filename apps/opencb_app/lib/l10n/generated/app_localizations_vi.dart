@@ -899,4 +899,86 @@ class AppLocalizationsVi extends AppLocalizations {
 
   @override
   String get bulkTaggedSuffix => '.';
+
+  @override
+  String get lanDiagnostics => 'Chẩn đoán LAN';
+
+  @override
+  String get lanDiagnosticsSubtitle =>
+      'Trạng thái discovery, server và kết nối thiết bị';
+
+  @override
+  String get refreshDiagnostics => 'Làm mới';
+
+  @override
+  String get exportLog => 'Xuất log';
+
+  @override
+  String get localServices => 'Dịch vụ cục bộ';
+
+  @override
+  String get syncServer => 'Sync server';
+
+  @override
+  String get fileServer => 'File server';
+
+  @override
+  String get lanDiscovery => 'LAN discovery';
+
+  @override
+  String get running => 'Đang chạy';
+
+  @override
+  String get stopped => 'Đã dừng';
+
+  @override
+  String get foreground => 'Tiền cảnh';
+
+  @override
+  String get background => 'Chạy nền';
+
+  @override
+  String get screenAwake => 'Màn hình bật';
+
+  @override
+  String get screenSleeping => 'Màn hình tắt';
+
+  @override
+  String get beaconInterval => 'Nhịp beacon';
+
+  @override
+  String get connectionDetails => 'Chi tiết kết nối';
+
+  @override
+  String get recentEvents => 'Sự kiện gần đây';
+
+  @override
+  String get noDiagnosticEvents => 'Chưa có sự kiện chẩn đoán.';
+
+  @override
+  String get beaconReceived => 'Đang nhận beacon';
+
+  @override
+  String get remoteSleeping => 'Thiết bị đã báo đang ngủ';
+
+  @override
+  String get beaconExpired => 'Beacon đã hết hạn';
+
+  @override
+  String get beaconNeverSeen => 'Chưa nhận được beacon';
+
+  @override
+  String get lastPing => 'Ping gần nhất';
+
+  @override
+  String get notMeasured => 'Chưa đo';
+
+  @override
+  String get exportCrashReport => 'Xuất báo cáo sự cố';
+
+  @override
+  String get crashReportExportedPrefix => 'Đã xuất báo cáo sự cố vào';
+
+  @override
+  String get cannotExportCrashReport => 'Không xuất được báo cáo sự cố.';
 }

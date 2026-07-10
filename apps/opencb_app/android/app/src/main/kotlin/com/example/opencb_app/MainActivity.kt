@@ -170,6 +170,15 @@ object OpenCbNotificationBridge {
             }
         }
     }
+
+    fun sendScreenState(state: String) {
+        mainHandler.post {
+            platformChannel?.invokeMethod(
+                "androidScreenState",
+                mapOf("state" to state),
+            )
+        }
+    }
 }
 
 object OpenCbSharedFileBridge {
@@ -347,8 +356,17 @@ class OpenCbBackgroundService : Service() {
     private val screenStateReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
             when (intent?.action) {
+                Intent.ACTION_SCREEN_OFF -> {
+                    OpenCbNotificationBridge.sendScreenState("off")
+                    refreshForegroundNotification()
+                }
                 Intent.ACTION_SCREEN_ON,
-                Intent.ACTION_USER_PRESENT -> refreshForegroundNotification()
+                Intent.ACTION_USER_PRESENT -> {
+                    OpenCbNotificationBridge.sendScreenState(
+                        if (intent?.action == Intent.ACTION_USER_PRESENT) "userPresent" else "on"
+                    )
+                    refreshForegroundNotification()
+                }
             }
         }
     }
@@ -411,6 +429,7 @@ class OpenCbBackgroundService : Service() {
     private fun startScreenStateReceiver() {
         if (screenStateReceiverRegistered) return
         val filter = IntentFilter().apply {
+            addAction(Intent.ACTION_SCREEN_OFF)
             addAction(Intent.ACTION_SCREEN_ON)
             addAction(Intent.ACTION_USER_PRESENT)
         }
@@ -762,6 +781,9 @@ class MainActivity : FlutterActivity() {
                     "isBackgroundSyncServiceRunning" -> {
                         result.success(OpenCbBackgroundService.isRunning)
                     }
+                    "isScreenInteractive" -> {
+                        result.success(isScreenInteractive())
+                    }
                     "openNotificationSettings" -> {
                         result.success(openNotificationSettings())
                     }
@@ -990,6 +1012,20 @@ class MainActivity : FlutterActivity() {
     private fun isNightMode(): Boolean {
         return resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK ==
             Configuration.UI_MODE_NIGHT_YES
+    }
+
+    private fun isScreenInteractive(): Boolean {
+        return try {
+            val powerManager = getSystemService(Context.POWER_SERVICE) as PowerManager
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.KITKAT_WATCH) {
+                powerManager.isInteractive
+            } else {
+                @Suppress("DEPRECATION")
+                powerManager.isScreenOn
+            }
+        } catch (_: Exception) {
+            true
+        }
     }
 
     private fun resolveDeviceName(): String {

@@ -6,6 +6,27 @@ Tất cả thay đổi đáng chú ý của OpenCB sẽ được ghi ở đây.
 
 ## [Unreleased]
 
+## [1.6.1] - 2026-07-11
+
+### Added
+
+- Chẩn đoán LAN và xuất log để kiểm tra discovery, server, beacon và trạng thái thiết bị.
+- Ghi nhận lỗi Flutter/Dart cục bộ và xuất báo cáo sự cố từ trang Cập nhật ứng dụng.
+
+### Changed
+
+- Điều chỉnh discovery theo trạng thái màn hình Android, giảm sync lặp và làm rõ trạng thái online/offline.
+- Chuẩn hóa căn nội dung button, badge và menu theo từng nền tảng.
+- Mặc định cài mới trên Windows sử dụng tiếng Việt.
+- Đồng bộ giao diện Cập nhật ứng dụng giữa Windows và Android.
+
+### Fixed
+
+- Sửa chiều cao vô hạn ở phần cuối trang Thiết bị trên Android.
+- Ổn định trạng thái thiết bị khi beacon hết hạn hoặc điện thoại thay đổi trạng thái màn hình.
+
+## [1.6.0] - 2026-07-09
+
 ### Added
 
 - Android UI tối ưu màn hình dọc, floating toolbar, tìm kiếm nổi và tab thiết bị trong Cài đặt.
