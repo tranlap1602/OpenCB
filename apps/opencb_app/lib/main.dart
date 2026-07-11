@@ -15,12 +15,14 @@ import 'package:ffi/ffi.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:mobile_scanner/mobile_scanner.dart';
 import 'package:opencb_app/l10n/generated/app_localizations.dart';
+import 'package:package_info_plus/package_info_plus.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:qr_flutter/qr_flutter.dart';
 
 const MethodChannel _rootPlatformChannel = MethodChannel('opencb/platform');
-const String _appVersion = '1.6.1';
-const String _appVersionLabel = 'v$_appVersion';
+const String _fallbackAppVersion = '1.6.3';
+String _appVersion = _fallbackAppVersion;
+String get _appVersionLabel => 'v$_appVersion';
 const String _landingPageUrl = 'https://tranlap1602.github.io/OpenCB/';
 const String _githubRepoUrl = 'https://github.com/tranlap1602/OpenCB';
 const String _latestReleaseApiUrl =
@@ -31,9 +33,22 @@ const int _maxCrashLogBytes = 1024 * 1024;
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
+  await _loadInstalledAppVersion();
   await _initializeCrashReporting();
   _configureAndroidEdgeToEdge();
   runApp(const OpenCbApp());
+}
+
+Future<void> _loadInstalledAppVersion() async {
+  try {
+    final packageInfo = await PackageInfo.fromPlatform();
+    final installedVersion = packageInfo.version.trim();
+    if (installedVersion.isNotEmpty) {
+      _appVersion = installedVersion;
+    }
+  } catch (_) {
+    // Keep the release fallback if package metadata is temporarily unavailable.
+  }
 }
 
 Future<void> _initializeCrashReporting() async {

@@ -843,6 +843,47 @@ class AppLocalizationsEn extends AppLocalizations {
   String get cannotCheckUpdates => 'Could not check for updates.';
 
   @override
+  String get later => 'Later';
+
+  @override
+  String get updateReadyWindows =>
+      'OpenCB will download and verify the installer, then close the app to install the new version.';
+
+  @override
+  String get updateReadyAndroid =>
+      'OpenCB will download and verify the APK, then open the Android installer.';
+
+  @override
+  String get updateAssetUnavailable =>
+      'No compatible installer was found. You can open the download page instead.';
+
+  @override
+  String get downloadAndInstall => 'Download and install';
+
+  @override
+  String get downloadApk => 'Download APK';
+
+  @override
+  String get openDownloadPage => 'Open download page';
+
+  @override
+  String get downloadingUpdate => 'Downloading update';
+
+  @override
+  String get cancelingUpdate => 'Canceling...';
+
+  @override
+  String get preparingUpdate => 'Preparing installation...';
+
+  @override
+  String get updateDownloadFailed =>
+      'Could not download the update. Check your network and try again.';
+
+  @override
+  String get cannotOpenInstaller =>
+      'The update was downloaded, but the installer could not be opened.';
+
+  @override
   String get retentionLimit => 'Retention limit';
 
   @override
@@ -984,45 +1025,4 @@ class AppLocalizationsEn extends AppLocalizations {
 
   @override
   String get cannotExportCrashReport => 'Could not export the crash report.';
-
-  @override
-  String get later => 'Later';
-
-  @override
-  String get updateReadyWindows =>
-      'OpenCB will download and verify the installer, then close the app to install the new version.';
-
-  @override
-  String get updateReadyAndroid =>
-      'OpenCB will download and verify the APK, then open the Android installer.';
-
-  @override
-  String get updateAssetUnavailable =>
-      'No compatible installer was found. You can open the download page instead.';
-
-  @override
-  String get downloadAndInstall => 'Download and install';
-
-  @override
-  String get downloadApk => 'Download APK';
-
-  @override
-  String get openDownloadPage => 'Open download page';
-
-  @override
-  String get downloadingUpdate => 'Downloading update';
-
-  @override
-  String get cancelingUpdate => 'Canceling...';
-
-  @override
-  String get preparingUpdate => 'Preparing installation...';
-
-  @override
-  String get updateDownloadFailed =>
-      'Could not download the update. Check your network and try again.';
-
-  @override
-  String get cannotOpenInstaller =>
-      'The update was downloaded, but the installer could not be opened.';
 }

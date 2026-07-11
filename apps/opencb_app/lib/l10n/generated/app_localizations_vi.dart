@@ -840,6 +840,47 @@ class AppLocalizationsVi extends AppLocalizations {
   String get cannotCheckUpdates => 'Không kiểm tra được cập nhật.';
 
   @override
+  String get later => 'Để sau';
+
+  @override
+  String get updateReadyWindows =>
+      'OpenCB sẽ tải bộ cài, kiểm tra file rồi tự đóng ứng dụng để cài đè phiên bản mới.';
+
+  @override
+  String get updateReadyAndroid =>
+      'OpenCB sẽ tải APK, kiểm tra file rồi mở màn hình cài đặt của Android.';
+
+  @override
+  String get updateAssetUnavailable =>
+      'Không tìm thấy file cài đặt phù hợp. Bạn có thể mở trang tải xuống.';
+
+  @override
+  String get downloadAndInstall => 'Tải và cài đặt';
+
+  @override
+  String get downloadApk => 'Tải APK';
+
+  @override
+  String get openDownloadPage => 'Mở trang tải xuống';
+
+  @override
+  String get downloadingUpdate => 'Đang tải bản cập nhật';
+
+  @override
+  String get cancelingUpdate => 'Đang hủy...';
+
+  @override
+  String get preparingUpdate => 'Đang chuẩn bị cài đặt...';
+
+  @override
+  String get updateDownloadFailed =>
+      'Không tải được bản cập nhật. Hãy kiểm tra mạng và thử lại.';
+
+  @override
+  String get cannotOpenInstaller =>
+      'Đã tải xong nhưng không mở được trình cài đặt.';
+
+  @override
   String get retentionLimit => 'Giới hạn lưu';
 
   @override
@@ -981,45 +1022,4 @@ class AppLocalizationsVi extends AppLocalizations {
 
   @override
   String get cannotExportCrashReport => 'Không xuất được báo cáo sự cố.';
-
-  @override
-  String get later => 'Để sau';
-
-  @override
-  String get updateReadyWindows =>
-      'OpenCB sẽ tải bộ cài, kiểm tra file rồi tự đóng ứng dụng để cài đè phiên bản mới.';
-
-  @override
-  String get updateReadyAndroid =>
-      'OpenCB sẽ tải APK, kiểm tra file rồi mở màn hình cài đặt của Android.';
-
-  @override
-  String get updateAssetUnavailable =>
-      'Không tìm thấy file cài đặt phù hợp. Bạn có thể mở trang tải xuống.';
-
-  @override
-  String get downloadAndInstall => 'Tải và cài đặt';
-
-  @override
-  String get downloadApk => 'Tải APK';
-
-  @override
-  String get openDownloadPage => 'Mở trang tải xuống';
-
-  @override
-  String get downloadingUpdate => 'Đang tải bản cập nhật';
-
-  @override
-  String get cancelingUpdate => 'Đang hủy...';
-
-  @override
-  String get preparingUpdate => 'Đang chuẩn bị cài đặt...';
-
-  @override
-  String get updateDownloadFailed =>
-      'Không tải được bản cập nhật. Hãy kiểm tra mạng và thử lại.';
-
-  @override
-  String get cannotOpenInstaller =>
-      'Đã tải xong nhưng không mở được trình cài đặt.';
 }

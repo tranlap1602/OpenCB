@@ -6,6 +6,13 @@ Tất cả thay đổi đáng chú ý của OpenCB sẽ được ghi ở đây.
 
 ## [Unreleased]
 
+## [1.6.3] - 2026-07-11
+
+### Fixed
+
+- Đọc phiên bản trực tiếp từ metadata APK/EXE thay vì giá trị hardcode, tránh báo nhầm bản đang cài là phiên bản cũ.
+- Ngăn hộp thoại cập nhật xuất hiện lại khi người dùng đã cài đúng phiên bản mới nhất.
+
 ## [1.6.2] - 2026-07-11
 
 ### Added

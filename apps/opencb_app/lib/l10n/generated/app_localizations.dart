@@ -1700,6 +1700,78 @@ abstract class AppLocalizations {
   /// **'Không kiểm tra được cập nhật.'**
   String get cannotCheckUpdates;
 
+  /// No description provided for @later.
+  ///
+  /// In vi, this message translates to:
+  /// **'Để sau'**
+  String get later;
+
+  /// No description provided for @updateReadyWindows.
+  ///
+  /// In vi, this message translates to:
+  /// **'OpenCB sẽ tải bộ cài, kiểm tra file rồi tự đóng ứng dụng để cài đè phiên bản mới.'**
+  String get updateReadyWindows;
+
+  /// No description provided for @updateReadyAndroid.
+  ///
+  /// In vi, this message translates to:
+  /// **'OpenCB sẽ tải APK, kiểm tra file rồi mở màn hình cài đặt của Android.'**
+  String get updateReadyAndroid;
+
+  /// No description provided for @updateAssetUnavailable.
+  ///
+  /// In vi, this message translates to:
+  /// **'Không tìm thấy file cài đặt phù hợp. Bạn có thể mở trang tải xuống.'**
+  String get updateAssetUnavailable;
+
+  /// No description provided for @downloadAndInstall.
+  ///
+  /// In vi, this message translates to:
+  /// **'Tải và cài đặt'**
+  String get downloadAndInstall;
+
+  /// No description provided for @downloadApk.
+  ///
+  /// In vi, this message translates to:
+  /// **'Tải APK'**
+  String get downloadApk;
+
+  /// No description provided for @openDownloadPage.
+  ///
+  /// In vi, this message translates to:
+  /// **'Mở trang tải xuống'**
+  String get openDownloadPage;
+
+  /// No description provided for @downloadingUpdate.
+  ///
+  /// In vi, this message translates to:
+  /// **'Đang tải bản cập nhật'**
+  String get downloadingUpdate;
+
+  /// No description provided for @cancelingUpdate.
+  ///
+  /// In vi, this message translates to:
+  /// **'Đang hủy...'**
+  String get cancelingUpdate;
+
+  /// No description provided for @preparingUpdate.
+  ///
+  /// In vi, this message translates to:
+  /// **'Đang chuẩn bị cài đặt...'**
+  String get preparingUpdate;
+
+  /// No description provided for @updateDownloadFailed.
+  ///
+  /// In vi, this message translates to:
+  /// **'Không tải được bản cập nhật. Hãy kiểm tra mạng và thử lại.'**
+  String get updateDownloadFailed;
+
+  /// No description provided for @cannotOpenInstaller.
+  ///
+  /// In vi, this message translates to:
+  /// **'Đã tải xong nhưng không mở được trình cài đặt.'**
+  String get cannotOpenInstaller;
+
   /// No description provided for @retentionLimit.
   ///
   /// In vi, this message translates to:
@@ -1981,19 +2053,6 @@ abstract class AppLocalizations {
   /// In vi, this message translates to:
   /// **'Không xuất được báo cáo sự cố.'**
   String get cannotExportCrashReport;
-
-  String get later;
-  String get updateReadyWindows;
-  String get updateReadyAndroid;
-  String get updateAssetUnavailable;
-  String get downloadAndInstall;
-  String get downloadApk;
-  String get openDownloadPage;
-  String get downloadingUpdate;
-  String get cancelingUpdate;
-  String get preparingUpdate;
-  String get updateDownloadFailed;
-  String get cannotOpenInstaller;
 }
 
 class _AppLocalizationsDelegate
