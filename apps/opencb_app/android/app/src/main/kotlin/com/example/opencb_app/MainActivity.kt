@@ -34,6 +34,7 @@ import android.provider.Settings
 import android.util.Log
 import android.view.View
 import android.widget.Toast
+import androidx.core.content.FileProvider
 import io.flutter.app.FlutterApplication
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
@@ -696,6 +697,7 @@ class MainActivity : FlutterActivity() {
     private val publicDownloadFiles = mutableMapOf<String, File>()
     private val contentInputStreams = mutableMapOf<String, InputStream>()
     private var pendingAndroidFilePickerResult: MethodChannel.Result? = null
+    private var pendingApkPath: String? = null
     private var currentNavigationBarColor = defaultNavigationBarColor()
     private var currentStatusBarColor = defaultNavigationBarColor()
     private var currentLightSystemBars = true
@@ -724,6 +726,7 @@ class MainActivity : FlutterActivity() {
         if (OpenCbBackgroundService.isRunning && hasNotificationPermission()) {
             OpenCbBackgroundService.start(this)
         }
+        resumePendingApkInstall()
     }
 
     override fun onRequestPermissionsResult(
@@ -927,6 +930,10 @@ class MainActivity : FlutterActivity() {
                         } catch (_: Exception) {
                             result.success(false)
                         }
+                    }
+                    "installApk" -> {
+                        val path = call.argument<String>("path")
+                        result.success(installApk(path))
                     }
                     else -> result.notImplemented()
                 }
@@ -1150,6 +1157,61 @@ class MainActivity : FlutterActivity() {
             startActivity(
                 Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS).apply {
                     data = Uri.parse("package:$packageName")
+                }
+            )
+            true
+        } catch (_: Exception) {
+            false
+        }
+    }
+
+    private fun installApk(path: String?): Boolean {
+        if (path.isNullOrBlank()) return false
+        val apk = File(path)
+        if (!apk.isFile) return false
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O &&
+            !packageManager.canRequestPackageInstalls()
+        ) {
+            return try {
+                pendingApkPath = apk.absolutePath
+                startActivity(
+                    Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES).apply {
+                        data = Uri.parse("package:$packageName")
+                    }
+                )
+                true
+            } catch (_: Exception) {
+                pendingApkPath = null
+                false
+            }
+        }
+        return launchApkInstaller(apk)
+    }
+
+    private fun resumePendingApkInstall() {
+        val path = pendingApkPath ?: return
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O &&
+            !packageManager.canRequestPackageInstalls()
+        ) {
+            return
+        }
+        pendingApkPath = null
+        launchApkInstaller(File(path))
+    }
+
+    private fun launchApkInstaller(apk: File): Boolean {
+        if (!apk.isFile) return false
+        return try {
+            val uri = FileProvider.getUriForFile(
+                this,
+                "$packageName.fileprovider",
+                apk,
+            )
+            startActivity(
+                Intent(Intent.ACTION_VIEW).apply {
+                    setDataAndType(uri, "application/vnd.android.package-archive")
+                    addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                    addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
                 }
             )
             true

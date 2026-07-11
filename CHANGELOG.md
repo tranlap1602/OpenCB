@@ -6,6 +6,19 @@ Tất cả thay đổi đáng chú ý của OpenCB sẽ được ghi ở đây.
 
 ## [Unreleased]
 
+## [1.6.2] - 2026-07-11
+
+### Added
+
+- Tải bản cập nhật trực tiếp trong ứng dụng với tiến trình, kiểm tra kích thước và SHA-256 khi GitHub cung cấp digest.
+- Windows có thể mở bộ cài sau khi tải; Android có thể chuyển sang trình cài APK của hệ thống.
+
+### Changed
+
+- Sắp xếp phần Ghép thiết bị mới xuống dưới mã QR trên giao diện Windows.
+- Làm rõ bảng màu Đen trắng và Blue Grey ở cả chế độ sáng và tối.
+- Cập nhật liên kết tải Windows và Android trên landing page cho phiên bản 1.6.2.
+
 ## [1.6.1] - 2026-07-11
 
 ### Added

@@ -7,6 +7,7 @@ import 'dart:typed_data';
 import 'dart:ui' as ui;
 
 import 'package:desktop_drop/desktop_drop.dart';
+import 'package:crypto/crypto.dart';
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -167,6 +168,74 @@ void _applyAndroidSystemUiStyle(
 enum ClipboardKind { text, code, url, image, fileReference }
 
 enum _HistoryScopeFilter { all, pinned, tagged }
+
+class _UpdateReleaseAsset {
+  const _UpdateReleaseAsset({
+    required this.name,
+    required this.downloadUrl,
+    required this.size,
+    this.sha256,
+  });
+
+  final String name;
+  final Uri downloadUrl;
+  final int size;
+  final String? sha256;
+}
+
+class _UpdateReleaseInfo {
+  const _UpdateReleaseInfo({
+    required this.tag,
+    required this.releaseUrl,
+    required this.asset,
+  });
+
+  final String tag;
+  final String releaseUrl;
+  final _UpdateReleaseAsset? asset;
+}
+
+class _UpdateDownloadProgress {
+  const _UpdateDownloadProgress({
+    required this.receivedBytes,
+    required this.totalBytes,
+    this.canceling = false,
+  });
+
+  final int receivedBytes;
+  final int totalBytes;
+  final bool canceling;
+
+  double? get fraction =>
+      totalBytes > 0 ? (receivedBytes / totalBytes).clamp(0.0, 1.0) : null;
+}
+
+class _UpdateDownloadController extends ValueNotifier<_UpdateDownloadProgress> {
+  _UpdateDownloadController(int totalBytes)
+    : super(_UpdateDownloadProgress(receivedBytes: 0, totalBytes: totalBytes));
+
+  HttpClient? client;
+  bool canceled = false;
+
+  void updateProgress(int receivedBytes, int totalBytes) {
+    if (canceled) return;
+    value = _UpdateDownloadProgress(
+      receivedBytes: receivedBytes,
+      totalBytes: totalBytes,
+    );
+  }
+
+  void cancel() {
+    if (canceled) return;
+    canceled = true;
+    value = _UpdateDownloadProgress(
+      receivedBytes: value.receivedBytes,
+      totalBytes: value.totalBytes,
+      canceling: true,
+    );
+    client?.close(force: true);
+  }
+}
 
 enum AppLanguage {
   system(null),
@@ -1405,62 +1474,102 @@ ColorScheme _colorSchemeForPreset(M3ThemePreset preset, Brightness brightness) {
     'mono_black_white' =>
       brightness == Brightness.dark
           ? base.copyWith(
-              primary: const Color(0xFFE5E5E5),
-              onPrimary: const Color(0xFF1A1A1A),
-              primaryContainer: const Color(0xFF3A3A3A),
-              onPrimaryContainer: const Color(0xFFF2F2F2),
-              secondary: const Color(0xFFC7C7C7),
-              onSecondary: const Color(0xFF242424),
-              secondaryContainer: const Color(0xFF343434),
-              onSecondaryContainer: const Color(0xFFEDEDED),
-              tertiary: const Color(0xFFBDBDBD),
-              onTertiary: const Color(0xFF202020),
-              tertiaryContainer: const Color(0xFF2F2F2F),
-              onTertiaryContainer: const Color(0xFFEAEAEA),
+              primary: const Color(0xFFF2F2F2),
+              onPrimary: const Color(0xFF111111),
+              primaryContainer: const Color(0xFF3B3B3B),
+              onPrimaryContainer: const Color(0xFFFFFFFF),
+              secondary: const Color(0xFFD2D2D2),
+              onSecondary: const Color(0xFF171717),
+              secondaryContainer: const Color(0xFF303030),
+              onSecondaryContainer: const Color(0xFFF4F4F4),
+              tertiary: const Color(0xFFB8B8B8),
+              onTertiary: const Color(0xFF171717),
+              tertiaryContainer: const Color(0xFF292929),
+              onTertiaryContainer: const Color(0xFFECECEC),
+              surface: const Color(0xFF101010),
+              onSurface: const Color(0xFFF1F1F1),
+              onSurfaceVariant: const Color(0xFFC7C7C7),
+              surfaceContainerLowest: const Color(0xFF090909),
+              surfaceContainerLow: const Color(0xFF171717),
+              surfaceContainer: const Color(0xFF1C1C1C),
+              surfaceContainerHigh: const Color(0xFF242424),
+              surfaceContainerHighest: const Color(0xFF2D2D2D),
+              outline: const Color(0xFF929292),
+              outlineVariant: const Color(0xFF474747),
             )
           : base.copyWith(
-              primary: const Color(0xFF111111),
+              primary: const Color(0xFF0A0A0A),
               onPrimary: Colors.white,
-              primaryContainer: const Color(0xFFE6E6E6),
-              onPrimaryContainer: const Color(0xFF111111),
-              secondary: const Color(0xFF555555),
+              primaryContainer: const Color(0xFFDCDCDC),
+              onPrimaryContainer: const Color(0xFF090909),
+              secondary: const Color(0xFF3F3F3F),
               onSecondary: Colors.white,
-              secondaryContainer: const Color(0xFFE0E0E0),
-              onSecondaryContainer: const Color(0xFF1D1D1D),
-              tertiary: const Color(0xFF707070),
+              secondaryContainer: const Color(0xFFE5E5E5),
+              onSecondaryContainer: const Color(0xFF111111),
+              tertiary: const Color(0xFF626262),
               onTertiary: Colors.white,
-              tertiaryContainer: const Color(0xFFE9E9E9),
-              onTertiaryContainer: const Color(0xFF202020),
+              tertiaryContainer: const Color(0xFFEEEEEE),
+              onTertiaryContainer: const Color(0xFF151515),
+              surface: const Color(0xFFF8F8F8),
+              onSurface: const Color(0xFF151515),
+              onSurfaceVariant: const Color(0xFF4B4B4B),
+              surfaceContainerLowest: const Color(0xFFFFFFFF),
+              surfaceContainerLow: const Color(0xFFF1F1F1),
+              surfaceContainer: const Color(0xFFEAEAEA),
+              surfaceContainerHigh: const Color(0xFFE2E2E2),
+              surfaceContainerHighest: const Color(0xFFD9D9D9),
+              outline: const Color(0xFF767676),
+              outlineVariant: const Color(0xFFC5C5C5),
             ),
     'blue_grey' =>
       brightness == Brightness.dark
           ? base.copyWith(
-              primary: const Color(0xFFB9CBD3),
-              onPrimary: const Color(0xFF102027),
-              primaryContainer: const Color(0xFF314952),
-              onPrimaryContainer: const Color(0xFFD7EAF1),
-              secondary: const Color(0xFFC1CED4),
+              primary: const Color(0xFFB6D7E5),
+              onPrimary: const Color(0xFF002F3D),
+              primaryContainer: const Color(0xFF244B59),
+              onPrimaryContainer: const Color(0xFFD0F0FC),
+              secondary: const Color(0xFFBBC9CF),
               onSecondary: const Color(0xFF253238),
-              secondaryContainer: const Color(0xFF3A4A51),
-              onSecondaryContainer: const Color(0xFFDDE8ED),
-              tertiary: const Color(0xFFAFC9DA),
-              onTertiary: const Color(0xFF193240),
-              tertiaryContainer: const Color(0xFF304D5C),
-              onTertiaryContainer: const Color(0xFFD3EAF7),
+              secondaryContainer: const Color(0xFF3B494F),
+              onSecondaryContainer: const Color(0xFFD7E5EB),
+              tertiary: const Color(0xFFC5C4E9),
+              onTertiary: const Color(0xFF2E2E50),
+              tertiaryContainer: const Color(0xFF464667),
+              onTertiaryContainer: const Color(0xFFE3E1FF),
+              surface: const Color(0xFF101416),
+              onSurface: const Color(0xFFE1E5E7),
+              onSurfaceVariant: const Color(0xFFBEC8CC),
+              surfaceContainerLowest: const Color(0xFF0A0F11),
+              surfaceContainerLow: const Color(0xFF171C1F),
+              surfaceContainer: const Color(0xFF1B2023),
+              surfaceContainerHigh: const Color(0xFF252B2E),
+              surfaceContainerHighest: const Color(0xFF303639),
+              outline: const Color(0xFF899398),
+              outlineVariant: const Color(0xFF404A4E),
             )
           : base.copyWith(
-              primary: const Color(0xFF455A64),
+              primary: const Color(0xFF345E6D),
               onPrimary: Colors.white,
-              primaryContainer: const Color(0xFFD7E4EA),
-              onPrimaryContainer: const Color(0xFF102027),
-              secondary: const Color(0xFF607D8B),
+              primaryContainer: const Color(0xFFBFE8F7),
+              onPrimaryContainer: const Color(0xFF002F3D),
+              secondary: const Color(0xFF52666F),
               onSecondary: Colors.white,
-              secondaryContainer: const Color(0xFFDCE8ED),
-              onSecondaryContainer: const Color(0xFF1B2A30),
-              tertiary: const Color(0xFF546E7A),
+              secondaryContainer: const Color(0xFFD5E5EB),
+              onSecondaryContainer: const Color(0xFF152A31),
+              tertiary: const Color(0xFF5D5C7D),
               onTertiary: Colors.white,
-              tertiaryContainer: const Color(0xFFD8E7EF),
-              onTertiaryContainer: const Color(0xFF152A34),
+              tertiaryContainer: const Color(0xFFE3E0FF),
+              onTertiaryContainer: const Color(0xFF292846),
+              surface: const Color(0xFFF5F8FA),
+              onSurface: const Color(0xFF171C1F),
+              onSurfaceVariant: const Color(0xFF404A4E),
+              surfaceContainerLowest: const Color(0xFFFFFFFF),
+              surfaceContainerLow: const Color(0xFFEDF2F4),
+              surfaceContainer: const Color(0xFFE7ECEF),
+              surfaceContainerHigh: const Color(0xFFDDE4E7),
+              surfaceContainerHighest: const Color(0xFFD3DCE0),
+              outline: const Color(0xFF707A7F),
+              outlineVariant: const Color(0xFFBEC8CC),
             ),
     _ => base,
   };
@@ -1530,6 +1639,7 @@ class _ClipboardHomePageState extends State<ClipboardHomePage>
   bool _syncHostRefreshInFlight = false;
   bool _mobileSearchOpen = false;
   bool _checkingForUpdates = false;
+  bool _downloadingUpdate = false;
   bool _appInForeground = true;
   bool _androidScreenAwake = true;
   DateTime _lastDiscoveredDevicePruneAt = DateTime.fromMillisecondsSinceEpoch(
@@ -1544,6 +1654,7 @@ class _ClipboardHomePageState extends State<ClipboardHomePage>
   FileTransferStatus? _fileTransferStatusFilter;
   String? _syncError;
   String? _latestUpdateMessage;
+  _UpdateReleaseInfo? _availableUpdate;
   String? _lastClipboardText;
   String _lastAndroidBackgroundNotificationDevicesKey = '';
   OpenCbStorage? _storage;
@@ -5602,6 +5713,52 @@ class _ClipboardHomePageState extends State<ClipboardHomePage>
     }
   }
 
+  _UpdateReleaseAsset? _selectUpdateAsset(
+    Map<String, dynamic> release,
+    String tag,
+  ) {
+    final expectedName = Platform.isWindows
+        ? 'OpenCB-Setup-$tag.exe'
+        : Platform.isAndroid
+        ? 'OpenCB-Android-release-$tag.apk'
+        : null;
+    if (expectedName == null) return null;
+    final extension = Platform.isWindows ? '.exe' : '.apk';
+    final assets = (release['assets'] as List<dynamic>? ?? const [])
+        .whereType<Map<String, dynamic>>()
+        .toList();
+    Map<String, dynamic>? selected;
+    for (final asset in assets) {
+      if (asset['name']?.toString() == expectedName) {
+        selected = asset;
+        break;
+      }
+    }
+    selected ??= assets.cast<Map<String, dynamic>?>().firstWhere((asset) {
+      final name = asset?['name']?.toString().toLowerCase() ?? '';
+      return name.startsWith('opencb-') && name.endsWith(extension);
+    }, orElse: () => null);
+    if (selected == null) return null;
+
+    final downloadUrl = Uri.tryParse(
+      selected['browser_download_url']?.toString() ?? '',
+    );
+    if (downloadUrl == null || downloadUrl.scheme != 'https') return null;
+    final rawSize = selected['size'];
+    final size = rawSize is int ? rawSize : int.tryParse('$rawSize') ?? 0;
+    final digest = selected['digest']?.toString().trim().toLowerCase();
+    final sha256Value =
+        digest != null && RegExp(r'^sha256:[0-9a-f]{64}$').hasMatch(digest)
+        ? digest.substring('sha256:'.length)
+        : null;
+    return _UpdateReleaseAsset(
+      name: selected['name']?.toString() ?? expectedName,
+      downloadUrl: downloadUrl,
+      size: size,
+      sha256: sha256Value,
+    );
+  }
+
   Future<void> _checkForUpdates({bool userInitiated = true}) async {
     if (_checkingForUpdates) return;
     final l10n = context.l10n;
@@ -5636,14 +5793,20 @@ class _ClipboardHomePageState extends State<ClipboardHomePage>
           throw const FormatException('Release không có phiên bản.');
         }
         final hasUpdate = _isRemoteVersionNewer(tag, _appVersion);
+        final updateInfo = _UpdateReleaseInfo(
+          tag: tag,
+          releaseUrl: releaseUrl,
+          asset: _selectUpdateAsset(decoded, tag),
+        );
         if (!mounted) return;
         setState(() {
+          _availableUpdate = hasUpdate ? updateInfo : null;
           _latestUpdateMessage = hasUpdate
               ? '${l10n.newVersionAvailable} $tag.'
               : l10n.latestVersionMessage;
         });
         if (hasUpdate) {
-          await _showUpdateAvailableDialog(tag, releaseUrl);
+          await _showUpdateAvailableDialog(updateInfo);
         } else if (userInitiated) {
           _showCenterSnackBar(l10n.latestVersionMessage, success: true);
         }
@@ -5665,33 +5828,47 @@ class _ClipboardHomePageState extends State<ClipboardHomePage>
     }
   }
 
-  Future<void> _showUpdateAvailableDialog(String tag, String releaseUrl) async {
+  Future<void> _showUpdateAvailableDialog(_UpdateReleaseInfo update) async {
     if (!mounted) return;
     await showDialog<void>(
       context: context,
       builder: (context) {
         final colorScheme = Theme.of(context).colorScheme;
+        final l10n = context.l10n;
+        final canDownload = update.asset != null;
         return AlertDialog(
           icon: Icon(Icons.system_update_alt, color: colorScheme.primary),
-          title: Text('Đã có OpenCB $tag'),
-          content: const Text(
-            'Bạn có thể tải bản cài đặt mới nhất từ GitHub Releases.',
+          title: Text('${l10n.newVersionAvailable} ${update.tag}'),
+          content: Text(
+            canDownload
+                ? Platform.isWindows
+                      ? l10n.updateReadyWindows
+                      : l10n.updateReadyAndroid
+                : l10n.updateAssetUnavailable,
           ),
           actions: [
             TextButton(
               onPressed: () => Navigator.of(context).pop(),
-              child: const _ButtonLabel(
-                'Để sau',
+              child: _ButtonLabel(
+                l10n.later,
                 alignment: _ControlLabelAlignment.buttonCentered,
               ),
             ),
             FilledButton(
               onPressed: () {
                 Navigator.of(context).pop();
-                unawaited(_openExternalUrl(releaseUrl));
+                if (canDownload) {
+                  unawaited(_downloadAndInstallUpdate(update));
+                } else {
+                  unawaited(_openExternalUrl(update.releaseUrl));
+                }
               },
-              child: const _ButtonLabel(
-                'Tải xuống',
+              child: _ButtonLabel(
+                canDownload
+                    ? Platform.isWindows
+                          ? l10n.downloadAndInstall
+                          : l10n.downloadApk
+                    : l10n.openDownloadPage,
                 alignment: _ControlLabelAlignment.buttonCentered,
               ),
             ),
@@ -5699,6 +5876,175 @@ class _ClipboardHomePageState extends State<ClipboardHomePage>
         );
       },
     );
+  }
+
+  Future<File> _updateDownloadTarget(_UpdateReleaseAsset asset) async {
+    final safeName = asset.name.replaceAll(RegExp(r'[<>:"/\\|?*]'), '_');
+    if (Platform.isAndroid) {
+      final cache = await getTemporaryDirectory();
+      final directory = Directory(
+        '${cache.path}${Platform.pathSeparator}updates',
+      );
+      await directory.create(recursive: true);
+      return File('${directory.path}${Platform.pathSeparator}$safeName');
+    }
+
+    final downloads = await getDownloadsDirectory();
+    final base = downloads ?? await _opencbDataDirectory();
+    final directory = Directory(
+      '${base.path}${Platform.pathSeparator}OpenCB${Platform.pathSeparator}Updates',
+    );
+    await directory.create(recursive: true);
+    return File('${directory.path}${Platform.pathSeparator}$safeName');
+  }
+
+  Future<File> _downloadUpdateAsset(
+    _UpdateReleaseAsset asset,
+    _UpdateDownloadController controller,
+  ) async {
+    final target = await _updateDownloadTarget(asset);
+    final partial = File('${target.path}.part');
+    if (await partial.exists()) await partial.delete();
+    final client = HttpClient()
+      ..connectionTimeout = const Duration(seconds: 15);
+    controller.client = client;
+    IOSink? sink;
+    try {
+      final request = await client.getUrl(asset.downloadUrl);
+      request.headers
+        ..set(HttpHeaders.userAgentHeader, 'OpenCB/$_appVersion')
+        ..set(HttpHeaders.acceptHeader, 'application/octet-stream');
+      final response = await request.close();
+      if (response.statusCode < 200 || response.statusCode >= 300) {
+        throw HttpException(
+          'Update download returned HTTP ${response.statusCode}.',
+          uri: asset.downloadUrl,
+        );
+      }
+      final totalBytes = response.contentLength > 0
+          ? response.contentLength
+          : asset.size;
+      var receivedBytes = 0;
+      var lastUiUpdate = DateTime.fromMillisecondsSinceEpoch(0);
+      sink = partial.openWrite();
+      await for (final chunk in response) {
+        if (controller.canceled) {
+          throw const FileSystemException('Update download canceled.');
+        }
+        sink.add(chunk);
+        receivedBytes += chunk.length;
+        final now = DateTime.now();
+        if (now.difference(lastUiUpdate) >= const Duration(milliseconds: 80)) {
+          controller.updateProgress(receivedBytes, totalBytes);
+          lastUiUpdate = now;
+        }
+      }
+      await sink.flush();
+      await sink.close();
+      sink = null;
+      controller.updateProgress(receivedBytes, totalBytes);
+
+      if (asset.size > 0 && receivedBytes != asset.size) {
+        throw const FormatException('Downloaded update size does not match.');
+      }
+      if (asset.sha256 != null) {
+        final calculated = await sha256.bind(partial.openRead()).first;
+        if (calculated.toString().toLowerCase() != asset.sha256) {
+          throw const FormatException(
+            'Downloaded update checksum does not match.',
+          );
+        }
+      }
+      if (controller.canceled) {
+        throw const FileSystemException('Update download canceled.');
+      }
+      if (await target.exists()) await target.delete();
+      return partial.rename(target.path);
+    } catch (_) {
+      if (await partial.exists()) {
+        try {
+          await partial.delete();
+        } catch (_) {}
+      }
+      rethrow;
+    } finally {
+      try {
+        await sink?.close();
+      } catch (_) {}
+      client.close(force: true);
+      controller.client = null;
+    }
+  }
+
+  Future<void> _launchDownloadedUpdate(
+    File file,
+    _UpdateReleaseInfo update,
+  ) async {
+    if (Platform.isWindows) {
+      await Process.start(file.path, const [], mode: ProcessStartMode.detached);
+      await Future<void>.delayed(const Duration(milliseconds: 450));
+      exit(0);
+    }
+    if (Platform.isAndroid) {
+      final opened = await _platformChannel.invokeMethod<bool>('installApk', {
+        'path': file.path,
+      });
+      if (opened != true) {
+        throw PlatformException(code: 'apk_installer_unavailable');
+      }
+      return;
+    }
+    await _openExternalUrl(update.releaseUrl);
+  }
+
+  Future<void> _downloadAndInstallUpdate(_UpdateReleaseInfo update) async {
+    final asset = update.asset;
+    if (asset == null || _downloadingUpdate) {
+      if (asset == null) unawaited(_openExternalUrl(update.releaseUrl));
+      return;
+    }
+    setState(() => _downloadingUpdate = true);
+    final controller = _UpdateDownloadController(asset.size);
+    var dialogOpen = true;
+    final dialogFuture = showDialog<void>(
+      context: context,
+      barrierDismissible: false,
+      builder: (context) =>
+          _UpdateDownloadDialog(assetName: asset.name, controller: controller),
+    ).whenComplete(() => dialogOpen = false);
+    unawaited(dialogFuture);
+    var canceled = false;
+
+    File? downloadedFile;
+    try {
+      downloadedFile = await _downloadUpdateAsset(asset, controller);
+      canceled = controller.canceled;
+      if (canceled) return;
+      if (mounted) {
+        setState(() => _latestUpdateMessage = context.l10n.preparingUpdate);
+      }
+    } catch (_) {
+      canceled = controller.canceled;
+      if (!canceled && mounted) {
+        _showCenterSnackBar(context.l10n.updateDownloadFailed);
+      }
+    } finally {
+      if (dialogOpen && mounted) {
+        Navigator.of(context, rootNavigator: true).pop();
+      }
+      await dialogFuture;
+      if (mounted) setState(() => _downloadingUpdate = false);
+      controller.dispose();
+    }
+
+    if (downloadedFile == null || canceled || !mounted) return;
+    try {
+      await _launchDownloadedUpdate(downloadedFile, update);
+    } catch (_) {
+      if (mounted) {
+        _showCenterSnackBar(context.l10n.cannotOpenInstaller);
+      }
+    }
   }
 
   Future<void> _openFileLocation(ClipboardEntry entry) async {
@@ -7632,7 +7978,9 @@ class _ClipboardHomePageState extends State<ClipboardHomePage>
           currentVersion: _appVersionLabel,
           autoCheckUpdates: _clipboardSettings.autoCheckUpdates,
           checking: _checkingForUpdates,
+          downloading: _downloadingUpdate,
           latestMessage: _latestUpdateMessage,
+          availableUpdate: _availableUpdate,
           onBack: _closeUpdateSettingsPage,
           onCheckNow: () => unawaited(_checkForUpdates()),
           onToggleAutoCheck: (value) => unawaited(
@@ -7643,6 +7991,8 @@ class _ClipboardHomePageState extends State<ClipboardHomePage>
           onOpenLandingPage: () => unawaited(_openExternalUrl(_landingPageUrl)),
           onOpenGithub: () => unawaited(_openExternalUrl(_githubRepoUrl)),
           onExportCrashReport: () => unawaited(_exportCrashReport()),
+          onDownloadUpdate: (update) =>
+              unawaited(_downloadAndInstallUpdate(update)),
         ),
       );
     }
@@ -15855,15 +16205,15 @@ class _DevicesPage extends StatelessWidget {
                     ),
                     onCopyPairPayload: onCopyPairPayload,
                   ),
-                ],
-              );
-              final rightColumn = Column(
-                children: [
+                  const SizedBox(height: 16),
                   _PairingActionsCard(
                     onAddPeer: onAddPeer,
                     onScanPairQr: onScanPairQr,
                   ),
-                  const SizedBox(height: 16),
+                ],
+              );
+              final rightColumn = Column(
+                children: [
                   _DiscoveredDevicesCard(
                     devices: unpairedDevices,
                     onAdd: onAddDiscoveredPeer,
@@ -16786,25 +17136,31 @@ class _UpdateSettingsPage extends StatelessWidget {
     required this.currentVersion,
     required this.autoCheckUpdates,
     required this.checking,
+    required this.downloading,
     required this.latestMessage,
+    required this.availableUpdate,
     required this.onBack,
     required this.onCheckNow,
     required this.onToggleAutoCheck,
     required this.onOpenLandingPage,
     required this.onOpenGithub,
     required this.onExportCrashReport,
+    required this.onDownloadUpdate,
   });
 
   final String currentVersion;
   final bool autoCheckUpdates;
   final bool checking;
+  final bool downloading;
   final String? latestMessage;
+  final _UpdateReleaseInfo? availableUpdate;
   final VoidCallback onBack;
   final VoidCallback onCheckNow;
   final ValueChanged<bool> onToggleAutoCheck;
   final VoidCallback onOpenLandingPage;
   final VoidCallback onOpenGithub;
   final VoidCallback onExportCrashReport;
+  final ValueChanged<_UpdateReleaseInfo> onDownloadUpdate;
 
   @override
   Widget build(BuildContext context) {
@@ -16894,6 +17250,25 @@ class _UpdateSettingsPage extends StatelessWidget {
                   ),
                   onTap: () => onToggleAutoCheck(!autoCheckUpdates),
                 ),
+                if (availableUpdate?.asset != null) ...[
+                  const SizedBox(height: 8),
+                  _UpdateSettingsSimpleRow(
+                    title: downloading
+                        ? l10n.downloadingUpdate
+                        : Platform.isWindows
+                        ? l10n.downloadAndInstall
+                        : l10n.downloadApk,
+                    trailing: downloading
+                        ? const SizedBox.square(
+                            dimension: 20,
+                            child: CircularProgressIndicator(strokeWidth: 2.5),
+                          )
+                        : null,
+                    onTap: () {
+                      if (!downloading) onDownloadUpdate(availableUpdate!);
+                    },
+                  ),
+                ],
                 const SizedBox(height: 8),
                 _UpdateSettingsSimpleRow(
                   title: l10n.exportCrashReport,
@@ -16980,6 +17355,69 @@ class _UpdateSettingsSimpleRow extends StatelessWidget {
             ],
           ),
         ),
+      ),
+    );
+  }
+}
+
+class _UpdateDownloadDialog extends StatelessWidget {
+  const _UpdateDownloadDialog({
+    required this.assetName,
+    required this.controller,
+  });
+
+  final String assetName;
+  final _UpdateDownloadController controller;
+
+  @override
+  Widget build(BuildContext context) {
+    final l10n = context.l10n;
+    return PopScope(
+      canPop: false,
+      child: AlertDialog(
+        title: Text(l10n.downloadingUpdate),
+        content: ValueListenableBuilder<_UpdateDownloadProgress>(
+          valueListenable: controller,
+          builder: (context, progress, _) {
+            final fraction = progress.fraction;
+            final amountLabel = progress.totalBytes > 0
+                ? '${_formatBytes(progress.receivedBytes)} / ${_formatBytes(progress.totalBytes)}'
+                : _formatBytes(progress.receivedBytes);
+            return SizedBox(
+              width: 380,
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(assetName, maxLines: 1, overflow: TextOverflow.ellipsis),
+                  const SizedBox(height: 16),
+                  LinearProgressIndicator(value: fraction),
+                  const SizedBox(height: 10),
+                  Row(
+                    children: [
+                      Expanded(child: Text(amountLabel)),
+                      if (fraction != null)
+                        Text('${(fraction * 100).toStringAsFixed(0)}%'),
+                    ],
+                  ),
+                  if (progress.canceling) ...[
+                    const SizedBox(height: 8),
+                    Text(l10n.cancelingUpdate),
+                  ],
+                ],
+              ),
+            );
+          },
+        ),
+        actions: [
+          ValueListenableBuilder<_UpdateDownloadProgress>(
+            valueListenable: controller,
+            builder: (context, progress, _) => TextButton(
+              onPressed: progress.canceling ? null : controller.cancel,
+              child: _ButtonLabel(l10n.cancel),
+            ),
+          ),
+        ],
       ),
     );
   }

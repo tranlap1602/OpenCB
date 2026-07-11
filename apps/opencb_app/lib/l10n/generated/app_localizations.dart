@@ -1981,6 +1981,19 @@ abstract class AppLocalizations {
   /// In vi, this message translates to:
   /// **'Không xuất được báo cáo sự cố.'**
   String get cannotExportCrashReport;
+
+  String get later;
+  String get updateReadyWindows;
+  String get updateReadyAndroid;
+  String get updateAssetUnavailable;
+  String get downloadAndInstall;
+  String get downloadApk;
+  String get openDownloadPage;
+  String get downloadingUpdate;
+  String get cancelingUpdate;
+  String get preparingUpdate;
+  String get updateDownloadFailed;
+  String get cannotOpenInstaller;
 }
 
 class _AppLocalizationsDelegate
